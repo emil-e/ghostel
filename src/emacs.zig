@@ -255,6 +255,22 @@ pub const Env = struct {
             self.call1(self.intern("list"), self.makeString(msg)),
         );
     }
+
+    pub fn message(self: Env, msg: []const u8) void {
+        _ = self.call1(sym.message, self.makeString(msg));
+    }
+
+    pub fn messagef(self: Env, comptime fmt: []const u8, args: anytype) void {
+        var buf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch |err| switch (err) {
+            error.NoSpaceLeft => buf[0..],
+        };
+        self.message(msg);
+    }
+
+    pub fn redisplay(self: Env) void {
+        _ = self.call0(sym.redisplay);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -306,6 +322,8 @@ pub const Sym = struct {
     @"mark-marker": Value,
     @"marker-position": Value,
     @"set-marker": Value,
+    message: Value,
+    redisplay: Value,
 
     // Text property names
     face: Value,
