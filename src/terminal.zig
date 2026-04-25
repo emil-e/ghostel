@@ -11,8 +11,11 @@ const Self = @This();
 /// The libghostty terminal handle.
 terminal: gt.Terminal,
 
-/// Render state for incremental screen updates.
-render_state: gt.RenderState,
+/// Render state for incremental viewport updates.
+viewport_state: gt.RenderState,
+
+/// Render state for non-viewport rendering.
+scratch_state: gt.RenderState,
 
 /// Reusable row iterator (populated during redraw).
 row_iterator: gt.RenderStateRowIterator,
@@ -36,12 +39,6 @@ rows: u16,
 /// libghostty's scrollback cap.
 scrollback_in_buffer: usize = 0,
 
-/// Set by `vtWrite`, cleared at the end of `redraw`. Used to detect that
-/// libghostty has been written to since the last redraw — required by
-/// the cap-bound stale-scrollback rebuild trigger to distinguish "no
-/// activity" from "writes happened but total_rows plateaued".
-wrote_since_redraw: bool = false,
-
 /// When true, the next redraw erases the Emacs buffer,
 /// resets scrollback state, and forces a full rebuild.  The erase is deferred
 /// so `inhibit-redisplay` can prevent a visible blank frame.
@@ -58,15 +55,6 @@ rebuild_pending: bool = false,
 /// Reset by `resize` since a reflow means the stream is effectively
 /// new.
 last_input_was_cr: bool = false,
-
-/// Snapshot of the first scrollback row's codepoints (one per cell, up
-/// to `cols` entries), sampled at the end of each redraw that touched
-/// scrollback. Used to detect rotation (libghostty evicting the oldest
-/// row in lockstep with new ones being pushed) when `total_rows` is
-/// plateaued at the cap. Only meaningful when `first_scrollback_row_valid`
-/// is true.
-first_scrollback_row: [512]u32 = [_]u32{0} ** 512,
-first_scrollback_row_valid: bool = false,
 
 /// Cached Emacs env pointer — only valid during a callback from Emacs.
 env: ?emacs.Env = null,
@@ -85,11 +73,17 @@ pub fn init(cols: u16, rows: u16, max_scrollback: usize) !Self {
     }
     errdefer gt.c.ghostty_terminal_free(terminal);
 
-    var render_state: gt.RenderState = undefined;
-    if (gt.c.ghostty_render_state_new(null, &render_state) != gt.SUCCESS) {
+    var viewport_state: gt.RenderState = undefined;
+    if (gt.c.ghostty_render_state_new(null, &viewport_state) != gt.SUCCESS) {
         return error.RenderStateCreateFailed;
     }
-    errdefer gt.c.ghostty_render_state_free(render_state);
+    errdefer gt.c.ghostty_render_state_free(viewport_state);
+
+    var scratch_state: gt.RenderState = undefined;
+    if (gt.c.ghostty_render_state_new(null, &scratch_state) != gt.SUCCESS) {
+        return error.RenderStateCreateFailed;
+    }
+    errdefer gt.c.ghostty_render_state_free(scratch_state);
 
     var row_iterator: gt.RenderStateRowIterator = undefined;
     if (gt.c.ghostty_render_state_row_iterator_new(null, &row_iterator) != gt.SUCCESS) {
@@ -117,7 +111,8 @@ pub fn init(cols: u16, rows: u16, max_scrollback: usize) !Self {
 
     return .{
         .terminal = terminal,
-        .render_state = render_state,
+        .viewport_state = viewport_state,
+        .scratch_state = scratch_state,
         .row_iterator = row_iterator,
         .row_cells = row_cells,
         .key_encoder = key_encoder,
@@ -133,7 +128,8 @@ pub fn deinit(self: *Self) void {
     gt.c.ghostty_key_encoder_free(self.key_encoder);
     gt.c.ghostty_render_state_row_cells_free(self.row_cells);
     gt.c.ghostty_render_state_row_iterator_free(self.row_iterator);
-    gt.c.ghostty_render_state_free(self.render_state);
+    gt.c.ghostty_render_state_free(self.viewport_state);
+    gt.c.ghostty_render_state_free(self.scratch_state);
     gt.c.ghostty_terminal_free(self.terminal);
 }
 
@@ -219,7 +215,6 @@ pub fn getColorBackground(self: *Self, out: *gt.ColorRgb) bool {
 /// Feed VT data from the PTY into the terminal.
 pub fn vtWrite(self: *Self, data: []const u8) void {
     gt.c.ghostty_terminal_vt_write(self.terminal, data.ptr, data.len);
-    self.wrote_since_redraw = true;
 }
 
 /// Resize the terminal.
@@ -283,13 +278,22 @@ pub fn isAltScreen(self: *Self) bool {
         self.isModeEnabled(@as(gt.c.GhosttyMode, 47));
 }
 
-/// Get the total number of rows (scrollback + active screen).
-pub fn getTotalRows(self: *Self) usize {
-    var total: usize = 0;
-    if (gt.c.ghostty_terminal_get(self.terminal, gt.DATA_TOTAL_ROWS, @ptrCast(&total)) != gt.SUCCESS) {
+/// Get the number of scrollback rows.
+pub fn getScrollbackRows(self: *Self) usize {
+    var rows: usize = 0;
+    if (gt.c.ghostty_terminal_get(self.terminal, gt.DATA_SCROLLBACK_ROWS, @ptrCast(&rows)) != gt.SUCCESS) {
         return self.rows;
     }
-    return total;
+    return rows;
+}
+
+/// Get the number of total rows.
+pub fn getTotalRows(self: *Self) usize {
+    var rows: usize = 0;
+    if (gt.c.ghostty_terminal_get(self.terminal, gt.DATA_TOTAL_ROWS, @ptrCast(&rows)) != gt.SUCCESS) {
+        return self.rows;
+    }
+    return rows;
 }
 
 /// Get the scrollbar state (total, offset, len).

@@ -224,6 +224,10 @@ pub const Env = struct {
         return self.call0(sym.@"line-end-position");
     }
 
+    pub fn lineBeginningPosition2(self: Env) Value {
+        return self.call1(sym.@"line-beginning-position", self.makeInteger(2));
+    }
+
     pub fn pointMax(self: Env) Value {
         return self.call0(sym.@"point-max");
     }
@@ -316,6 +320,7 @@ pub const Sym = struct {
     @"move-to-column": Value,
     @"erase-buffer": Value,
     @"line-end-position": Value,
+    @"line-beginning-position": Value,
     @"point-max": Value,
     @"delete-region": Value,
     @"char-before": Value,

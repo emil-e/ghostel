@@ -183,23 +183,6 @@ fn fnWriteInput(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     }
     term.last_input_was_cr = prev_was_cr;
 
-    // Detect CSI 3 J (erase scrollback). libghostty processes it and clears
-    // its scrollback, but provides no notification. Set rebuild_pending so the
-    // next redraw erases the Emacs buffer and re-fetches from libghostty.
-    // The flag is necessary because CSI 3 J followed by enough new output to
-    // restore the same scrollback depth is undetectable by count or hash alone.
-    //
-    // This is a stateless substring scan over a single write, so it misses:
-    // (1) sequences split across two writes (ESC in one, "[3J" in the next);
-    // (2) non-canonical forms — parameter padding like `\x1B[03J`, or the
-    //     8-bit C1 form `\x9B3J`.
-    // libghostty's stateful VT parser still clears its scrollback in those
-    // cases, so the `libghostty_sb < scrollback_in_buffer` shrink check in
-    // redraw() is the fallback that catches them.
-    if (std.mem.indexOf(u8, raw, "\x1B[3J") != null) {
-        term.rebuild_pending = true;
-    }
-
     // Scan for OSC sequences that libghostty-vt discards (7, 51, 52, 133).
     // One pass, dispatched by code in document order.
     dispatchPostWriteOscs(env, term, raw);
@@ -912,16 +895,25 @@ fn fnDebugState(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     const env = emacs.Env.init(raw_env.?);
     const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
 
+    // Preserve viewport position
+    if (term.getScrollbar()) |sb| {
+        defer {
+            term.scrollViewport(gt.SCROLL_TOP, 0);
+            term.scrollViewport(gt.SCROLL_DELTA, @intCast(sb.offset));
+        }
+    }
+    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
+
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
 
     // Try update
-    const update_result = gt.c.ghostty_render_state_update(term.render_state, term.terminal);
-    pos += (std.fmt.bufPrint(buf[pos..], "update={d} ", .{update_result}) catch return env.nil()).len;
+    const update_result = gt.c.ghostty_render_state_update(term.viewport_state, term.terminal);
+    pos += (std.fmt.bufPrint(buf[pos..], "update={d}\n", .{update_result}) catch return env.nil()).len;
 
     // Read first row via iterator
-    if (gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
-        pos += (std.fmt.bufPrint(buf[pos..], "iter=FAIL", .{}) catch return env.nil()).len;
+    if (gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
+        pos += (std.fmt.bufPrint(buf[pos..], "iter=FAIL\n", .{}) catch return env.nil()).len;
         return env.makeString(buf[0..pos]);
     }
 
@@ -930,7 +922,7 @@ fn fnDebugState(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
         if (row_idx >= 10) break;
 
         if (gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_CELLS, @ptrCast(&term.row_cells)) != gt.SUCCESS) {
-            pos += (std.fmt.bufPrint(buf[pos..], "row{d}=FAIL ", .{row_idx}) catch break).len;
+            pos += (std.fmt.bufPrint(buf[pos..], "row{d}=FAIL\n ", .{row_idx}) catch break).len;
             continue;
         }
 
@@ -957,7 +949,7 @@ fn fnDebugState(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
             const enc_len = std.unicode.utf8Encode(cp, remaining) catch continue;
             pos += enc_len;
         }
-        pos += (std.fmt.bufPrint(buf[pos..], "\" ", .{}) catch break).len;
+        pos += (std.fmt.bufPrint(buf[pos..], "\"\n", .{}) catch break).len;
     }
 
     return env.makeString(buf[0..pos]);
@@ -969,6 +961,15 @@ fn fnDebugFeed(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*a
     const env = emacs.Env.init(raw_env.?);
     const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
 
+    // Preserve viewport position
+    if (term.getScrollbar()) |sb| {
+        defer {
+            term.scrollViewport(gt.SCROLL_TOP, 0);
+            term.scrollViewport(gt.SCROLL_DELTA, @intCast(sb.offset));
+        }
+    }
+    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
+
     var stack_buf: [4096]u8 = undefined;
     const data = env.extractString(args[1], &stack_buf) orelse return env.nil();
 
@@ -976,7 +977,7 @@ fn fnDebugFeed(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*a
     gt.c.ghostty_terminal_vt_write(term.terminal, data.ptr, data.len);
 
     // Update render state
-    _ = gt.c.ghostty_render_state_update(term.render_state, term.terminal);
+    _ = gt.c.ghostty_render_state_update(term.viewport_state, term.terminal);
 
     // Read cursor position
     var cx: u16 = 0;
@@ -985,13 +986,13 @@ fn fnDebugFeed(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*a
     _ = gt.c.ghostty_terminal_get(term.terminal, gt.c.GHOSTTY_TERMINAL_DATA_CURSOR_Y, @ptrCast(&cy));
 
     // Read first row from render state
-    if (gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
+    if (gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
         return env.makeString("iter-fail");
     }
 
     var buf: [2048]u8 = undefined;
     var pos: usize = 0;
-    pos += (std.fmt.bufPrint(buf[pos..], "cur=({d},{d}) row0=\"", .{ cx, cy }) catch return env.nil()).len;
+    pos += (std.fmt.bufPrint(buf[pos..], "cur=({d},{d})\n row0=\"", .{ cx, cy }) catch return env.nil()).len;
 
     if (gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) {
         if (gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_CELLS, @ptrCast(&term.row_cells)) == gt.SUCCESS) {
@@ -1026,17 +1027,26 @@ fn fnCursorPosition(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _
     const env = emacs.Env.init(raw_env.?);
     const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
 
+    // Preserve viewport position
+    if (term.getScrollbar()) |sb| {
+        defer {
+            term.scrollViewport(gt.SCROLL_TOP, 0);
+            term.scrollViewport(gt.SCROLL_DELTA, @intCast(sb.offset));
+        }
+    }
+    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
+
     // Ensure render state is up to date
-    _ = gt.c.ghostty_render_state_update(term.render_state, term.terminal);
+    _ = gt.c.ghostty_render_state_update(term.viewport_state, term.terminal);
 
     var cursor_has_value: bool = false;
-    _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_HAS_VALUE, @ptrCast(&cursor_has_value));
+    _ = gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_CURSOR_VIEWPORT_HAS_VALUE, @ptrCast(&cursor_has_value));
     if (!cursor_has_value) return env.nil();
 
     var cx: u16 = 0;
     var cy: u16 = 0;
-    _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_X, @ptrCast(&cx));
-    _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_Y, @ptrCast(&cy));
+    _ = gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_CURSOR_VIEWPORT_X, @ptrCast(&cx));
+    _ = gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_CURSOR_VIEWPORT_Y, @ptrCast(&cy));
 
     return env.call2(emacs.sym.cons, env.makeInteger(@as(i64, cx)), env.makeInteger(@as(i64, cy)));
 }
