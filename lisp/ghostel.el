@@ -578,7 +578,6 @@ Bump this only when the Elisp code requires a newer native module
 (declare-function ghostel--mouse-event "ghostel-module")
 (declare-function ghostel--new "ghostel-module")
 (declare-function ghostel--redraw "ghostel-module" (term &optional full))
-(declare-function ghostel--scroll-bottom "ghostel-module")
 (declare-function ghostel--set-default-colors "ghostel-module")
 (declare-function ghostel--set-palette "ghostel-module")
 (declare-function ghostel--set-size "ghostel-module")
@@ -1325,7 +1324,6 @@ when `ghostel-scroll-on-input' is nil.  Call from any path where
 the user's action implies \"show me the prompt\" — typed input,
 paste, yank, drop."
   (when (and ghostel-scroll-on-input ghostel--term)
-    (ghostel--scroll-bottom ghostel--term)
     (setq ghostel--snap-requested t)
     (setq ghostel--force-next-redraw t)))
 
@@ -1570,7 +1568,6 @@ pasted using bracketed paste."
     (ghostel--flush-pending-output)
     ;; CSI H = home, CSI 2 J = erase screen, CSI 3 J = erase scrollback.
     (ghostel--write-input ghostel--term "\e[H\e[2J\e[3J")
-    (ghostel--scroll-bottom ghostel--term)
     (setq ghostel--force-next-redraw t)
     ;; Scrollback is gone; any recorded scroll position no longer
     ;; refers to real content.  Reset so the next redraw anchors
