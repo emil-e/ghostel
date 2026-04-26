@@ -3,10 +3,10 @@
 ;;; Commentary:
 
 ;; Run with:
-;;   `emacs --batch -Q -L . -l ert -l test/ghostel-test.el -f ghostel-test-run'
+;;   `emacs --batch -Q -L lisp -l ert -l test/ghostel-test.el -f ghostel-test-run'
 ;;
 ;; Pure Elisp tests only (no native module):
-;;   `emacs --batch -Q -L . -l ert -l test/ghostel-test.el -f ghostel-test-run-elisp'
+;;   `emacs --batch -Q -L lisp -l ert -l test/ghostel-test.el -f ghostel-test-run-elisp'
 
 ;;; Code:
 
