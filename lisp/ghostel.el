@@ -580,6 +580,7 @@ Bump this only when the Elisp code requires a newer native module
 (declare-function ghostel--set-palette "ghostel-module")
 (declare-function ghostel--set-size "ghostel-module")
 (declare-function ghostel--write-input "ghostel-module")
+(declare-function ghostel--native-uri-at "ghostel-module")
 
 
 ;;; Automatic download and compilation of native module
@@ -1846,6 +1847,29 @@ stripped so the copied text matches the original terminal content."
     map)
   "Keymap for clickable hyperlinks in ghostel buffers.")
 
+(defun ghostel--native-link-help-echo (window _ pos)
+  "help-echo handler for OSC8 hyperlinks. Retrieves native URI from libghostty."
+  (with-current-buffer (window-buffer window)
+    (ghostel--native-uri-at-pos pos)))
+
+(defun ghostel--native-uri-at-pos (pos)
+  "Returns the native OSC8 hyperlink URI at POS."
+  (save-excursion
+	(goto-char pos)
+	(let* ((line (line-number-at-pos nil t))
+		   (total (line-number-at-pos (point-max) t))
+		   (row-from-bottom (- total line))
+		   (col (current-column)))
+	  (ghostel--native-uri-at ghostel--term row-from-bottom col))))
+
+(defun ghostel--uri-at-pos (pos)
+  "Returns the URI as pos by return the help-echo property if it's a string,
+otherwise fetches the native OSC8 URI at that position."
+  (let ((help-echo (get-text-property (point) 'help-echo)))
+	(if (stringp help-echo)
+		help-echo
+	  (ghostel--native-uri-at-pos pos))))
+
 (defun ghostel--open-link (url)
   "Open URL, dispatching by scheme.
 file:// URIs open in Emacs; http(s) and other schemes use `browse-url'.
@@ -1874,13 +1898,12 @@ a line suffix opens at the start of the file or directory."
 (defun ghostel-open-link-at-click (event)
   "Open the hyperlink at the mouse click EVENT position."
   (interactive "e")
-  (ghostel--open-link
-   (get-text-property (posn-point (event-start event)) 'help-echo)))
+  (ghostel--open-link (ghostel--uri-at-pos (posn-point (event-start event)))))
 
 (defun ghostel-open-link-at-point ()
   "Open the hyperlink at point."
   (interactive)
-  (ghostel--open-link (get-text-property (point) 'help-echo)))
+  (ghostel--open-link (ghostel--uri-at-pos (point))))
 
 (defun ghostel--find-next-link (from)
   "Return start position of the first hyperlink after FROM, or nil.

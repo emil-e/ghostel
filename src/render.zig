@@ -23,6 +23,7 @@ const CellStyle = struct {
     underline_color: ?gt.ColorRgb = null,
     strikethrough: bool = false,
     inverse: bool = false,
+    hyperlink: bool = false,
 
     fn eql(a: CellStyle, b: CellStyle) bool {
         return colorEql(a.fg, b.fg) and
@@ -33,7 +34,8 @@ const CellStyle = struct {
             a.underline == b.underline and
             colorEql(a.underline_color, b.underline_color) and
             a.strikethrough == b.strikethrough and
-            a.inverse == b.inverse;
+            a.inverse == b.inverse and
+            a.hyperlink == b.hyperlink;
     }
 
     fn isDefault(self: CellStyle) bool {
@@ -44,7 +46,8 @@ const CellStyle = struct {
             !self.faint and
             self.underline == 0 and
             !self.strikethrough and
-            !self.inverse;
+            !self.inverse and
+            !self.hyperlink;
     }
 };
 
@@ -90,33 +93,8 @@ fn formatColor(color: gt.ColorRgb, buf: *[7]u8) []const u8 {
 /// so cells that need both the semantic-content check (in-prompt) and
 /// the wide-spacer check (empty grapheme) only pay for one
 /// `cells_get(RAW)` call.
-const RawTag = enum { unset, loaded, failed };
-
-/// Lazily populate `out` with the raw cell; memoizes success/failure
-/// in `tag` so repeated calls within one cell do not re-issue the get.
-///
-/// The cache assumes `cells_get(RAW)` is idempotent for a given
-/// iterator position (which it is in libghostty today — it returns a
-/// handle into already-materialized cell data).  If that ever
-/// changes, a failed first call would become sticky for the rest of
-/// the current cell.
-fn loadRawCell(cells: gt.RenderStateRowCells, out: *gt.c.GhosttyCell, tag: *RawTag) bool {
-    switch (tag.*) {
-        .unset => {
-            if (gt.c.ghostty_render_state_row_cells_get(cells, gt.c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, @ptrCast(out)) == gt.SUCCESS) {
-                tag.* = .loaded;
-                return true;
-            }
-            tag.* = .failed;
-            return false;
-        },
-        .loaded => return true,
-        .failed => return false,
-    }
-}
-
 /// Read the style for the current cell from the render state.
-fn readCellStyle(cells: gt.RenderStateRowCells) CellStyle {
+fn readCellStyle(cells: gt.RenderStateRowCells, raw: gt.c.GhosttyCell) CellStyle {
     var style: CellStyle = .{};
 
     // Read resolved FG color
@@ -148,6 +126,11 @@ fn readCellStyle(cells: gt.RenderStateRowCells) CellStyle {
         }
     }
 
+    var hl: bool = undefined;
+    if (gt.c.ghostty_cell_get(raw, gt.c.GHOSTTY_CELL_DATA_HAS_HYPERLINK, @ptrCast(&hl)) == gt.SUCCESS) {
+        style.hyperlink = hl;
+    }
+
     return style;
 }
 
@@ -157,8 +140,10 @@ fn applyStyle(env: emacs.Env, start: i64, end: i64, style: CellStyle, default_fg
     if (style.isDefault()) return;
     if (start >= end) return;
 
-    var props: [24]emacs.Value = undefined;
-    var prop_count: usize = 0;
+    var face_props: [24]emacs.Value = undefined;
+    var face_prop_count: usize = 0;
+    const start_val = env.makeInteger(start);
+    const end_val = env.makeInteger(end);
 
     var fg_buf: [7]u8 = undefined;
     var bg_buf: [7]u8 = undefined;
@@ -174,45 +159,45 @@ fn applyStyle(env: emacs.Env, start: i64, end: i64, style: CellStyle, default_fg
         // Always set :foreground since we modify the color itself.
         const dimmed = dimColor(effective_fg, effective_bg);
         const dim_str = formatColor(dimmed, &dim_buf);
-        props[prop_count] = s.@":foreground";
-        prop_count += 1;
-        props[prop_count] = env.makeString(dim_str);
-        prop_count += 1;
+        face_props[face_prop_count] = s.@":foreground";
+        face_prop_count += 1;
+        face_props[face_prop_count] = env.makeString(dim_str);
+        face_prop_count += 1;
     } else if (!colorEql(style.fg, null) or style.inverse) {
         const fg_str = formatColor(effective_fg, &fg_buf);
-        props[prop_count] = s.@":foreground";
-        prop_count += 1;
-        props[prop_count] = env.makeString(fg_str);
-        prop_count += 1;
+        face_props[face_prop_count] = s.@":foreground";
+        face_prop_count += 1;
+        face_props[face_prop_count] = env.makeString(fg_str);
+        face_prop_count += 1;
     }
 
     if (!colorEql(style.bg, null) or style.inverse) {
         const bg_str = formatColor(effective_bg, &bg_buf);
-        props[prop_count] = s.@":background";
-        prop_count += 1;
-        props[prop_count] = env.makeString(bg_str);
-        prop_count += 1;
+        face_props[face_prop_count] = s.@":background";
+        face_prop_count += 1;
+        face_props[face_prop_count] = env.makeString(bg_str);
+        face_prop_count += 1;
     }
 
     if (style.bold) {
-        props[prop_count] = s.@":weight";
-        prop_count += 1;
-        props[prop_count] = s.bold;
-        prop_count += 1;
+        face_props[face_prop_count] = s.@":weight";
+        face_prop_count += 1;
+        face_props[face_prop_count] = s.bold;
+        face_prop_count += 1;
     }
 
     if (style.italic) {
-        props[prop_count] = s.@":slant";
-        prop_count += 1;
-        props[prop_count] = s.italic;
-        prop_count += 1;
+        face_props[face_prop_count] = s.@":slant";
+        face_prop_count += 1;
+        face_props[face_prop_count] = s.italic;
+        face_prop_count += 1;
     }
 
     if (style.underline != 0) {
-        props[prop_count] = s.@":underline";
-        prop_count += 1;
+        face_props[face_prop_count] = s.@":underline";
+        face_prop_count += 1;
         if (style.underline == 1 and style.underline_color == null) {
-            props[prop_count] = env.t();
+            face_props[face_prop_count] = env.t();
         } else {
             var ul_props: [4]emacs.Value = undefined;
             var ul_count: usize = 0;
@@ -236,170 +221,28 @@ fn applyStyle(env: emacs.Env, start: i64, end: i64, style: CellStyle, default_fg
                 ul_count += 1;
             }
 
-            props[prop_count] = env.funcall(s.list, ul_props[0..ul_count]);
+            face_props[face_prop_count] = env.funcall(s.list, ul_props[0..ul_count]);
         }
-        prop_count += 1;
+        face_prop_count += 1;
     }
 
     if (style.strikethrough) {
-        props[prop_count] = s.@":strike-through";
-        prop_count += 1;
-        props[prop_count] = env.t();
-        prop_count += 1;
+        face_props[face_prop_count] = s.@":strike-through";
+        face_prop_count += 1;
+        face_props[face_prop_count] = env.t();
+        face_prop_count += 1;
     }
 
-    if (prop_count == 0) return;
-
-    const face = env.funcall(s.list, props[0..prop_count]);
-    const start_val = env.makeInteger(start);
-    const end_val = env.makeInteger(end);
-    env.putTextProperty(start_val, end_val, s.face, face);
-}
-
-/// A hyperlink span detected from the terminal grid.
-const HyperlinkSpan = struct {
-    row: u16,
-    col_start: u16,
-    col_end: u16,
-    uri_start: usize, // offset into uri_buf
-    uri_len: usize,
-};
-
-/// Result of hyperlink scanning.
-const HyperlinkResult = struct {
-    count: usize,
-    uri_used: usize,
-};
-
-/// Scan specific rows for hyperlinks using the grid_ref API.
-/// Queries each cell directly for its hyperlink URI, coalescing
-/// adjacent cells with the same URI into spans.
-fn scanHyperlinksFromGrid(
-    terminal: gt.Terminal,
-    cols: u16,
-    hyperlink_rows: []const u16,
-    spans: []HyperlinkSpan,
-    uri_buf: []u8,
-) HyperlinkResult {
-    var span_count: usize = 0;
-    var uri_used: usize = 0;
-
-    for (hyperlink_rows) |row| {
-        var in_link = false;
-        var link_start_col: u16 = 0;
-        var link_uri_start: usize = 0;
-        var link_uri_len: usize = 0;
-
-        for (0..cols) |col_idx| {
-            const col: u16 = @intCast(col_idx);
-
-            // Build viewport point for this cell
-            var point: gt.Point = undefined;
-            point.tag = gt.c.GHOSTTY_POINT_TAG_VIEWPORT;
-            point.value = .{ .coordinate = .{ .x = col, .y = @intCast(row) } };
-
-            // Resolve grid ref
-            var grid_ref = std.mem.zeroes(gt.GridRef);
-            grid_ref.size = @sizeOf(gt.GridRef);
-            if (gt.c.ghostty_terminal_grid_ref(terminal, point, &grid_ref) != gt.SUCCESS) {
-                if (in_link and span_count < spans.len and col > link_start_col) {
-                    spans[span_count] = .{ .row = row, .col_start = link_start_col, .col_end = col, .uri_start = link_uri_start, .uri_len = link_uri_len };
-                    span_count += 1;
-                }
-                in_link = false;
-                continue;
-            }
-
-            // Query hyperlink URI (stack buffer; heap fallback for long URIs)
-            var uri_stack: [2048]u8 = undefined;
-            var out_len: usize = 0;
-            var result = gt.c.ghostty_grid_ref_hyperlink_uri(&grid_ref, &uri_stack, uri_stack.len, &out_len);
-            var heap_uri: ?[]u8 = null;
-            defer if (heap_uri) |buf| std.heap.c_allocator.free(buf);
-
-            if (result == gt.OUT_OF_SPACE and out_len > uri_stack.len) {
-                if (std.heap.c_allocator.alloc(u8, out_len)) |buf| {
-                    heap_uri = buf;
-                    result = gt.c.ghostty_grid_ref_hyperlink_uri(&grid_ref, buf.ptr, buf.len, &out_len);
-                } else |_| {}
-            }
-
-            if (result == gt.SUCCESS and out_len > 0) {
-                const uri = if (heap_uri) |buf| buf[0..out_len] else uri_stack[0..out_len];
-                // Check if this extends the current span (same URI)
-                if (in_link and link_uri_len == out_len and
-                    std.mem.eql(u8, uri_buf[link_uri_start .. link_uri_start + link_uri_len], uri))
-                {
-                    // Same URI — span continues
-                } else {
-                    // Close previous span if any
-                    if (in_link and span_count < spans.len and col > link_start_col) {
-                        spans[span_count] = .{ .row = row, .col_start = link_start_col, .col_end = col, .uri_start = link_uri_start, .uri_len = link_uri_len };
-                        span_count += 1;
-                    }
-                    // Start new span, copy URI to shared buffer
-                    if (uri_used + out_len <= uri_buf.len) {
-                        @memcpy(uri_buf[uri_used .. uri_used + out_len], uri);
-                        link_uri_start = uri_used;
-                        link_uri_len = out_len;
-                        uri_used += out_len;
-                        link_start_col = col;
-                        in_link = true;
-                    } else {
-                        in_link = false;
-                    }
-                }
-            } else {
-                // No hyperlink on this cell — close any open span
-                if (in_link and span_count < spans.len and col > link_start_col) {
-                    spans[span_count] = .{ .row = row, .col_start = link_start_col, .col_end = col, .uri_start = link_uri_start, .uri_len = link_uri_len };
-                    span_count += 1;
-                }
-                in_link = false;
-            }
-        }
-
-        // Close span at end of row
-        if (in_link and span_count < spans.len and cols > link_start_col) {
-            spans[span_count] = .{ .row = row, .col_start = link_start_col, .col_end = cols, .uri_start = link_uri_start, .uri_len = link_uri_len };
-            span_count += 1;
-        }
+    if (face_prop_count > 0) {
+        const face = env.funcall(s.list, face_props[0..face_prop_count]);
+        env.putTextProperty(start_val, end_val, s.face, face);
     }
 
-    return .{ .count = span_count, .uri_used = uri_used };
-}
-
-/// Apply hyperlink text properties to the Emacs buffer.
-/// Row indices are relative to the viewport — caller passes the char
-/// position of the first viewport line so we can resolve absolute rows.
-fn applyHyperlinks(
-    env: emacs.Env,
-    spans: []const HyperlinkSpan,
-    span_count: usize,
-    uri_buf: []const u8,
-    viewport_start: i64,
-) void {
-    if (span_count == 0) return;
-
-    const s = &emacs.sym;
-    // Cache the link keymap value
-    const link_map = env.call1(s.@"symbol-value", s.@"ghostel-link-map");
-
-    for (spans[0..span_count]) |span| {
-        const uri = uri_buf[span.uri_start .. span.uri_start + span.uri_len];
-        if (uri.len == 0) continue;
-
-        // Navigate to span start (viewport-relative row -> absolute line)
-        env.gotoCharN(viewport_start);
-        _ = env.forwardLine(@as(i64, span.row));
-        env.moveToColumn(@as(i64, span.col_start));
-        const start = env.point();
-        env.moveToColumn(@as(i64, span.col_end));
-        const end = env.point();
-
-        env.putTextProperty(start, end, s.@"help-echo", env.makeString(uri));
-        env.putTextProperty(start, end, s.@"mouse-face", s.highlight);
-        env.putTextProperty(start, end, s.keymap, link_map);
+    if (style.hyperlink) {
+        env.messagef("HL: start_val = {}, end_val = {}", .{ start, end });
+        env.putTextProperty(start_val, end_val, s.@"help-echo", s.@"ghostel--native-link-help-echo");
+        env.putTextProperty(start_val, end_val, s.@"mouse-face", s.highlight);
+        env.putTextProperty(start_val, end_val, s.keymap, env.call1(s.@"symbol-value", s.@"ghostel-link-map"));
     }
 }
 
@@ -471,25 +314,21 @@ fn buildRowContent(
         if (gt.c.ghostty_render_state_row_cells_get(term.row_cells, gt.RS_CELLS_DATA_GRAPHEMES_LEN, @ptrCast(&graphemes_len)) != gt.SUCCESS) {
             continue;
         }
-
-        // Raw cell handle, fetched lazily for the semantic-content and
-        // wide-spacer checks that each need it. Without the shared slot,
-        // empty prompt padding would pay for two cells_get(RAW) calls.
         var raw_cell: gt.c.GhosttyCell = undefined;
-        var raw_tag: RawTag = .unset;
+        if (gt.c.ghostty_render_state_row_cells_get(term.row_cells, gt.c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, @ptrCast(&raw_cell)) != gt.SUCCESS) {
+            continue;
+        }
 
         // Track leading prompt characters via cell-level semantic content.
         if (in_prompt) {
             var semantic: c_int = 0; // GHOSTTY_CELL_SEMANTIC_OUTPUT
-            if (loadRawCell(term.row_cells, &raw_cell, &raw_tag)) {
-                _ = gt.c.ghostty_cell_get(raw_cell, gt.c.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, @ptrCast(&semantic));
-            }
+            _ = gt.c.ghostty_cell_get(raw_cell, gt.c.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, @ptrCast(&semantic));
             if (semantic != gt.c.GHOSTTY_CELL_SEMANTIC_PROMPT) {
                 in_prompt = false;
             }
         }
 
-        const cell_style = readCellStyle(term.row_cells);
+        const cell_style = readCellStyle(term.row_cells, raw_cell);
 
         // Flush run on style change
         if (char_len > run_start_char and !cell_style.eql(current_style)) {
@@ -512,9 +351,7 @@ fn buildRowContent(
             // not produce output — the preceding wide cell already accounts
             // for 2 visual columns in Emacs.
             var wide: c_int = gt.c.GHOSTTY_CELL_WIDE_NARROW;
-            if (loadRawCell(term.row_cells, &raw_cell, &raw_tag)) {
-                _ = gt.c.ghostty_cell_get(raw_cell, gt.c.GHOSTTY_CELL_DATA_WIDE, @ptrCast(&wide));
-            }
+            _ = gt.c.ghostty_cell_get(raw_cell, gt.c.GHOSTTY_CELL_DATA_WIDE, @ptrCast(&wide));
             if (wide == gt.c.GHOSTTY_CELL_WIDE_SPACER_TAIL) {
                 has_wide = true;
                 continue;
@@ -882,9 +719,6 @@ pub fn redraw(env: emacs.Env, term: *Terminal, force_full_arg: bool) void {
     // libghostty considers the cells clean.
     var dirty: c_int = gt.DIRTY_FALSE;
     _ = gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_DIRTY, @ptrCast(&dirty));
-    var has_hyperlinks: bool = false;
-    var hyperlink_rows: [256]u16 = undefined;
-    var hyperlink_row_count: usize = 0;
     var has_wide_chars: bool = false;
 
     if (dirty != gt.DIRTY_FALSE or force_full) {
@@ -933,20 +767,6 @@ pub fn redraw(env: emacs.Env, term: *Terminal, force_full_arg: bool) void {
             if (insertAndStyle(env, term, default_fg, default_bg)) |content| {
                 has_wide_chars |= content.has_wide;
             }
-
-            // Check for hyperlinks (row-level flag, may have false positives)
-            {
-                var raw_row: gt.c.GhosttyRow = undefined;
-                if (gt.c.ghostty_render_state_row_get(term.row_iterator, gt.c.GHOSTTY_RENDER_STATE_ROW_DATA_RAW, @ptrCast(&raw_row)) == gt.SUCCESS) {
-                    var row_has_links: bool = false;
-                    _ = gt.c.ghostty_row_get(raw_row, gt.ROW_DATA_HYPERLINK, @ptrCast(&row_has_links));
-                    if (row_has_links and hyperlink_row_count < hyperlink_rows.len) {
-                        hyperlink_rows[hyperlink_row_count] = @intCast(row_count);
-                        hyperlink_row_count += 1;
-                        has_hyperlinks = true;
-                    }
-                }
-            }
         }
 
         // If there's anything left below the viewport, delete it
@@ -955,24 +775,6 @@ pub fn redraw(env: emacs.Env, term: *Terminal, force_full_arg: bool) void {
         // Reset dirty state
         const dirty_false: c_int = gt.DIRTY_FALSE;
         _ = gt.c.ghostty_render_state_set(term.viewport_state, gt.RS_OPT_DIRTY, @ptrCast(&dirty_false));
-    }
-
-    // Scan for hyperlinks and apply text properties (before cursor positioning).
-    // Uses the grid_ref API to query hyperlink URIs directly from cells,
-    // only for rows flagged with GHOSTTY_ROW_DATA_HYPERLINK.
-    if (dirty != gt.DIRTY_FALSE and has_hyperlinks) {
-        var hl_spans: [128]HyperlinkSpan = undefined;
-        var hl_uri_buf: [8192]u8 = undefined;
-        const hl = scanHyperlinksFromGrid(
-            term.terminal,
-            term.cols,
-            hyperlink_rows[0..hyperlink_row_count],
-            &hl_spans,
-            &hl_uri_buf,
-        );
-        if (hl.count > 0) {
-            applyHyperlinks(env, &hl_spans, hl.count, &hl_uri_buf, viewport_start_int);
-        }
     }
 
     if (dirty != gt.DIRTY_FALSE) {

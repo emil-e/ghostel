@@ -49,6 +49,7 @@ export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int
     env.bindFunction("ghostel--module-version", 0, 0, &fnModuleVersion, "Return the native module version string.\n\n(ghostel--module-version)");
     env.bindFunction("ghostel--enable-vt-log", 0, 0, &fnEnableVtLog, "Enable libghostty internal log routing to *ghostel-debug*.\n\n(ghostel--enable-vt-log)");
     env.bindFunction("ghostel--disable-vt-log", 0, 0, &fnDisableVtLog, "Disable libghostty internal log routing.\n\n(ghostel--disable-vt-log)");
+    env.bindFunction("ghostel--native-uri-at", 3, 3, &fnUriAt, "Get URI at ROW-from-bottom and COL.\n\n(ghostel--native-uri-at TERM ROW COL)");
 
     emacs.initSymbols(env);
     env.provide("ghostel-module");
@@ -1214,4 +1215,41 @@ fn fnDisableVtLog(raw_env: ?*c.emacs_env, _: isize, _: [*c]c.emacs_value, _: ?*a
         vt_log_active = false;
     }
     return env.t();
+}
+
+// TODO refactor
+fn fnUriAt(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
+    const env = emacs.Env.init(raw_env.?);
+    const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
+    const row_from_bottom = env.extractInteger(args[1]);
+    const col = env.extractInteger(args[2]);
+    const row = term.getTotalRows() - @as(usize, @intCast(row_from_bottom));
+
+    const point = gt.Point{ .tag = gt.c.GHOSTTY_POINT_TAG_SCREEN, .value = gt.PointValue{ .coordinate = gt.PointCoordinate{
+        .x = @intCast(col),
+        .y = @intCast(row),
+    } } };
+    var grid_ref = gt.GridRef{ .size = @sizeOf(gt.GridRef) };
+    if (gt.c.ghostty_terminal_grid_ref(term.terminal, point, &grid_ref) != gt.SUCCESS) {
+        return env.nil();
+    }
+
+    // Query hyperlink URI (stack buffer; heap fallback for long URIs)
+    var uri_stack: [2048]u8 = undefined;
+    var out_len: usize = 0;
+    var result = gt.c.ghostty_grid_ref_hyperlink_uri(&grid_ref, &uri_stack, uri_stack.len, &out_len);
+
+    var heap_uri: ?[]u8 = null;
+    if (result == gt.OUT_OF_SPACE and out_len > uri_stack.len) {
+        if (std.heap.c_allocator.alloc(u8, out_len)) |buf| {
+            defer std.heap.c_allocator.free(buf);
+            heap_uri = buf;
+            result = gt.c.ghostty_grid_ref_hyperlink_uri(&grid_ref, buf.ptr, buf.len, &out_len);
+        } else |_| {
+            return env.nil();
+        }
+    }
+
+    const uri = if (heap_uri) |uri| uri else &uri_stack;
+    return env.makeString(uri[0..out_len]);
 }

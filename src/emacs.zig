@@ -329,6 +329,7 @@ pub const Sym = struct {
     @"set-marker": Value,
     message: Value,
     redisplay: Value,
+    ding: Value,
 
     // Text property names
     face: Value,
@@ -353,7 +354,8 @@ pub const Sym = struct {
     @"ghostel--flush-output": Value,
     @"ghostel--set-title": Value,
     @"ghostel--debug-log-vt": Value,
-    ding: Value,
+    @"ghostel--native-uri-at": Value,
+    @"ghostel--native-link-help-echo": Value,
 };
 
 pub var sym: Sym = undefined;
