@@ -3455,6 +3455,7 @@ spawns `sh -c COMMAND' directly, so the shell parses the paragraph
 normally."
   (skip-unless (file-executable-p "/bin/sh"))
   (let* ((buf-name "*ghostel-test-multiline-compile*")
+		 (shell-file-name "/bin/sh")
          (script "for i in 1 2 3; do\n  echo line-$i\ndone\nexit 7")
          (inhibit-message t)
          (save-some-buffers-default-predicate (lambda () nil)))
