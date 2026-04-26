@@ -567,8 +567,6 @@ Bump this only when the Elisp code requires a newer native module
 ;; Declare native module functions for the byte compiler
 
 (declare-function ghostel--cursor-position "ghostel-module")
-(declare-function ghostel--cursor-pending-wrap-p "ghostel-module")
-(declare-function ghostel--cursor-on-empty-row-p "ghostel-module")
 (declare-function ghostel--encode-key "ghostel-module")
 (declare-function ghostel--focus-event "ghostel-module")
 (declare-function ghostel--mode-enabled "ghostel-module")
@@ -3247,38 +3245,10 @@ No-op when `ghostel--snap-requested' (user input overrides)."
 (defun ghostel--anchor-window (win vs pt)
   "Pin WIN to viewport-start VS and sync its point to PT.
 Also resets pixel vscroll (pixel-scroll-precision-mode may leave a
-partial offset that would clip the top line after a redraw).
-
-Two terminal-side configurations land PT at `point-max' on the last
-visible row in a position Emacs redisplay treats as off-screen — which
-makes `scroll-conservatively' shift `window-start' up by one row,
-fighting the viewport pin and hiding the block cursor:
-
- 1. Pending-wrap: the last printed character filled the rightmost
-    column and the next print will soft-wrap (issue #138).
-
- 2. CUP park onto an empty trailing row, no pending-wrap: the TUI
-    moved the cursor via absolute positioning to a row that has no
-    written cells, so the row renders to an empty buffer line and PT
-    lands at `point-max' (issue #157).
-
-Clamp `window-point' back by one in either case so it sits inside the
-viewport; buffer-point is unaffected and subsequent redraws recapture
-the real cursor.  We must NOT clamp for a plain shell prompt where the
-cursor is legitimately at `point-max' after typing — doing so would
-draw the block cursor on the last character instead of after it
-\(issue #146)."
+partial offset that would clip the top line after a redraw)."
   (set-window-start win vs t)
   (set-window-vscroll win 0 t)
-  (set-window-point win (if (and (= pt (point-max))
-                                 (> pt (point-min))
-                                 ghostel--term
-                                 (or (ghostel--cursor-pending-wrap-p
-                                      ghostel--term)
-                                     (ghostel--cursor-on-empty-row-p
-                                      ghostel--term)))
-                            (1- pt)
-                          pt)))
+  (set-window-point win pt))
 
 (defun ghostel--restore-scrollback-window (win state)
   "Restore WIN to ws/wp recorded in STATE and push STATE to scroll-positions.

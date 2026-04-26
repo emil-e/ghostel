@@ -425,45 +425,6 @@ fn isRowPrompt(term: *Terminal) bool {
     return semantic != 0;
 }
 
-/// Return true if row `cy` (0-indexed, viewport-relative) renders to an
-/// empty Emacs buffer line — no cell has a grapheme and no cell has
-/// non-default styling.  Matches `buildRowContent`'s trim rules: a row
-/// for which this returns true produces `byte_len == 0`.
-///
-/// Assumes the caller has refreshed the render state (via
-/// `ghostty_render_state_update`).  Drives the row iterator, so callers
-/// must not rely on iterator position after this call.
-pub fn isRowEmptyAt(term: *Terminal, cy: u16) bool {
-    if (gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) return false;
-
-    var ri: u16 = 0;
-    while (ri <= cy) : (ri += 1) {
-        if (!gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) return false;
-    }
-
-    if (gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_CELLS, @ptrCast(&term.row_cells)) != gt.SUCCESS) {
-        return false;
-    }
-
-    while (gt.c.ghostty_render_state_row_cells_next(term.row_cells)) {
-        var graphemes_len: u32 = 0;
-        if (gt.c.ghostty_render_state_row_cells_get(term.row_cells, gt.RS_CELLS_DATA_GRAPHEMES_LEN, @ptrCast(&graphemes_len)) == gt.SUCCESS and graphemes_len > 0) {
-            return false;
-        }
-        // Mirror `buildRowContent`: wide-spacer-tail cells are skipped
-        // outright and never contribute to buffer content, even when
-        // they carry non-default styling.
-        var raw_cell: gt.c.GhosttyCell = undefined;
-        if (gt.c.ghostty_render_state_row_cells_get(term.row_cells, gt.c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, @ptrCast(&raw_cell)) == gt.SUCCESS) {
-            var wide: c_int = gt.c.GHOSTTY_CELL_WIDE_NARROW;
-            _ = gt.c.ghostty_cell_get(raw_cell, gt.c.GHOSTTY_CELL_DATA_WIDE, @ptrCast(&wide));
-            if (wide == gt.c.GHOSTTY_CELL_WIDE_SPACER_TAIL) continue;
-        }
-        if (!readCellStyle(term.row_cells).isDefault()) return false;
-    }
-    return true;
-}
-
 /// Result from buildRowContent: byte length for make_string, char count for properties.
 const RowContent = struct {
     byte_len: usize,
