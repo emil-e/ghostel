@@ -235,10 +235,8 @@ This is the vterm-style growing-buffer model that lets `isearch' and
               (should (string-match-p "row-05" content))
               ;; The most recent row is on the active screen.
               (should (string-match-p "row-11" content)))
-            ;; 12 distinct rows made it into the buffer.  The trailing
-            ;; empty cursor row is trimmed to nothing by the renderer
-            ;; and therefore contributes no additional line.
-            (should (= 12 (count-lines (point-min) (point-max))))))
+            ;; 12 distinct rows made it into the buffer + trailing newline
+            (should (= 13 (count-lines (point-min) (point-max))))))
       (kill-buffer buf))))
 
 (ert-deftest ghostel-test-scrollback-bootstrap-not-blank ()
@@ -1977,9 +1975,7 @@ first real focus event."
               (should (string-match-p "line-B" content))       ; row1 preserved
               (should (string-match-p "line-C updated" content))) ; row2 updated
 
-            ;; 3 content rows + 2 trailing blank rows trimmed to
-            ;; empty strings = 4 newlines = 4 lines counted.
-            (should (equal 4 (count-lines (point-min) (point-max))))))
+            (should (equal 5 (count-lines (point-min) (point-max))))))
       (kill-buffer buf))))
 
 ;; -----------------------------------------------------------------------
@@ -3862,7 +3858,7 @@ Emacs auto-scrolls to make point visible."
             ;; redraw anchored `window-start' at the viewport.
             (let ((vp-before (save-excursion
                                (goto-char (point-max))
-                               (forward-line -9)
+                               (forward-line -10)
                                (line-beginning-position))))
               (set-window-start (selected-window) vp-before t))
             (setq ghostel--force-next-redraw t)
@@ -3879,7 +3875,7 @@ Emacs auto-scrolls to make point visible."
                    (wp (window-point (selected-window)))
                    (vp-start (save-excursion
                                (goto-char (point-max))
-                               (forward-line -5)
+                               (forward-line -6)
                                (line-beginning-position))))
               (should (= ws vp-start))
               (should (>= wp vp-start)))))
@@ -4508,7 +4504,7 @@ scrollback positions."
             ;; (not the first blank line in the buffer).
             (let ((target (save-excursion
                             (goto-char (point-max))
-                            (forward-line -25)
+                            (forward-line -26)
                             (line-beginning-position))))
               (set-window-start (selected-window) target t)
               (let ((pre-key (ghostel--line-key target)))

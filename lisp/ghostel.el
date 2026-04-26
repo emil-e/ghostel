@@ -3151,14 +3151,7 @@ position COL columns into the first matched line."
     (when (> tr 0)
       (save-excursion
         (goto-char (point-max))
-        ;; Partial redraws can leave a trailing \n after the last row.
-        ;; Step past it so `forward-line' counts only content rows, not
-        ;; the phantom empty line that would otherwise push the viewport
-        ;; one line too deep and clip the bottom row.
-        (when (and (not (bobp))
-                   (eq (char-before) ?\n))
-          (forward-char -1))
-        (forward-line (- (1- tr)))
+        (forward-line (- tr))
         (line-beginning-position)))))
 
 (defun ghostel--schedule-link-detection (&optional begin end)
