@@ -136,7 +136,7 @@ fn readCellStyle(cells: gt.RenderStateRowCells, raw: gt.c.GhosttyCell) CellStyle
 
 /// Apply face properties to a region of the buffer.
 /// Uses (put-text-property START END 'face PLIST).
-fn applyStyle(env: emacs.Env, start: i64, end: i64, style: CellStyle, default_fg: gt.ColorRgb, default_bg: gt.ColorRgb) void {
+fn applyStyle(env: emacs.Env, start: i64, end: i64, style: CellStyle, default_colors: *const BgFg) void {
     if (style.isDefault()) return;
     if (start >= end) return;
 
@@ -149,8 +149,10 @@ fn applyStyle(env: emacs.Env, start: i64, end: i64, style: CellStyle, default_fg
     var bg_buf: [7]u8 = undefined;
     var dim_buf: [7]u8 = undefined;
 
-    const effective_fg = if (style.inverse) (style.bg orelse default_bg) else (style.fg orelse default_fg);
-    const effective_bg = if (style.inverse) (style.fg orelse default_fg) else (style.bg orelse default_bg);
+    const bg = style.bg orelse default_colors.bg;
+    const fg = style.fg orelse default_colors.fg;
+    const effective_fg = if (style.inverse) bg else fg;
+    const effective_bg = if (style.inverse) fg else bg;
 
     const s = &emacs.sym;
 
@@ -239,7 +241,6 @@ fn applyStyle(env: emacs.Env, start: i64, end: i64, style: CellStyle, default_fg
     }
 
     if (style.hyperlink) {
-        env.messagef("HL: start_val = {}, end_val = {}", .{ start, end });
         env.putTextProperty(start_val, end_val, s.@"help-echo", s.@"ghostel--native-link-help-echo");
         env.putTextProperty(start_val, end_val, s.@"mouse-face", s.highlight);
         env.putTextProperty(start_val, end_val, s.keymap, env.call1(s.@"symbol-value", s.@"ghostel-link-map"));
@@ -421,8 +422,7 @@ fn buildRowContent(
 fn insertAndStyle(
     env: emacs.Env,
     term: *Terminal,
-    default_fg: gt.ColorRgb,
-    default_bg: gt.ColorRgb,
+    default_colors: *const BgFg,
 ) ?RowContent {
     if (gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_CELLS, @ptrCast(&term.row_cells)) != gt.SUCCESS) {
         return null;
@@ -460,7 +460,7 @@ fn insertAndStyle(
 
         const prop_start = row_start + @as(i64, @intCast(run.start_char));
         const prop_end = row_start + @as(i64, @intCast(run_end));
-        applyStyle(env, prop_start, prop_end, run.style, default_fg, default_bg);
+        applyStyle(env, prop_start, prop_end, run.style, default_colors);
     }
 
     if (!newline_in_buf) {
@@ -503,41 +503,6 @@ fn insertAndStyle(
     }
 
     return content;
-}
-
-/// Insert `count` libghostty rows from the scrollback just above the active
-/// area. The rows will be inserted at current Emacs point.
-///
-/// Returns the number of rows actually inserted.
-fn insertScrollback(
-    env: emacs.Env,
-    term: *Terminal,
-    count: usize,
-    default_fg: gt.ColorRgb,
-    default_bg: gt.ColorRgb,
-) usize {
-    if (count == 0) return 0;
-
-    // Position libghostty viewport at first_row.
-    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
-    term.scrollViewport(gt.SCROLL_DELTA, -@as(isize, @intCast(count)));
-
-    var inserted: usize = 0;
-    while (inserted < count) {
-        if (gt.c.ghostty_render_state_update(term.scratch_state, term.terminal) != gt.SUCCESS) break;
-        if (gt.c.ghostty_render_state_get(term.scratch_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) break;
-
-        while (inserted < count and gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) {
-            _ = insertAndStyle(env, term, default_fg, default_bg);
-            inserted += 1;
-        }
-
-        if (inserted >= count) break;
-        // Advance viewport by a full page for the next iteration.
-        term.scrollViewport(gt.SCROLL_DELTA, @intCast(term.rows));
-    }
-
-    return inserted;
 }
 
 /// Convert a terminal column to an Emacs character offset by iterating
@@ -604,6 +569,117 @@ fn positionCursorByCell(env: emacs.Env, term: *Terminal, cx: u16, cy: u16) bool 
     return true;
 }
 
+fn clearDirtyFlags(term: *Terminal, state: gt.RenderState) void {
+    var rs_opt: gt.RenderStateOption = undefined;
+    if (gt.c.ghostty_render_state_get(state, gt.RS_DATA_DIRTY, @ptrCast(&rs_opt)) != gt.SUCCESS) {
+        return;
+    }
+    if (rs_opt == gt.DIRTY_FALSE) {
+        return;
+    }
+
+    rs_opt = gt.DIRTY_FALSE;
+    _ = gt.c.ghostty_render_state_set(state, gt.RS_DATA_DIRTY, @ptrCast(&rs_opt));
+
+    if (gt.c.ghostty_render_state_get(state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
+        return;
+    }
+    while (gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) {
+        const dirty_false = false;
+        _ = gt.c.ghostty_render_state_row_set(term.row_iterator, gt.RS_ROW_OPT_DIRTY, @ptrCast(&dirty_false));
+    }
+}
+
+const BgFg = struct {
+    bg: gt.ColorRgb,
+    fg: gt.ColorRgb,
+};
+
+fn getDefaultColors(term: *Terminal) BgFg {
+    var bgfg = BgFg{ .fg = gt.ColorRgb{ .r = 204, .g = 204, .b = 204 }, .bg = gt.ColorRgb{ .r = 0, .g = 0, .b = 0 } };
+    const color_keys = [_]gt.c.GhosttyRenderStateData{
+        gt.RS_DATA_COLOR_FOREGROUND,
+        gt.RS_DATA_COLOR_BACKGROUND,
+    };
+    var color_values = [_]?*anyopaque{
+        @ptrCast(&bgfg.fg),
+        @ptrCast(&bgfg.bg),
+    };
+    _ = gt.c.ghostty_render_state_get_multi(term.viewport_state, color_keys.len, &color_keys, @ptrCast(&color_values), null);
+
+    return bgfg;
+}
+
+pub fn render(env: emacs.Env, term: *Terminal, render_state: gt.RenderState, skip: usize, force_full: bool) void {
+    const default_colors = getDefaultColors(term);
+
+    // Check dirty state.
+    // force_full overrides: the buffer may have been erased by scrollback
+    // sync / resize / rotation above, so we must rebuild even if
+    // libghostty considers the cells clean.
+    var dirty: c_int = gt.DIRTY_FALSE;
+    _ = gt.c.ghostty_render_state_get(render_state, gt.RS_DATA_DIRTY, @ptrCast(&dirty));
+    var has_wide_chars: bool = false;
+
+    if (dirty != gt.DIRTY_FALSE or force_full) {
+        // Set buffer default face
+        var fg_hex: [7]u8 = undefined;
+        var bg_hex: [7]u8 = undefined;
+        _ = env.call2(
+            emacs.sym.@"ghostel--set-buffer-face",
+            env.makeString(formatColor(default_colors.fg, &fg_hex)),
+            env.makeString(formatColor(default_colors.bg, &bg_hex)),
+        );
+
+        // Get row iterator
+        if (gt.c.ghostty_render_state_get(render_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
+            return;
+        }
+
+        // Incremental redraw: only update dirty rows when possible.
+        // force_full bypasses partial mode to avoid stale rows after scrolls.
+        const dirty_full = force_full or dirty == gt.DIRTY_FULL;
+        var row_count: usize = 0;
+        while (gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) : (row_count += 1) {
+            defer {
+                // Clear per-row dirty flag
+                const row_clean: bool = false;
+                _ = gt.c.ghostty_render_state_row_set(term.row_iterator, gt.RS_ROW_OPT_DIRTY, @ptrCast(&row_clean));
+            }
+
+            if (row_count < skip) continue;
+
+            // Only process dirty rows
+            var dirty_row: bool = dirty_full;
+            if (!dirty_full) {
+                _ = gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_DIRTY, @ptrCast(&dirty_row));
+            }
+
+            if (dirty_row) {
+                env.deleteRegion(env.point(), env.lineBeginningPosition2());
+                if (insertAndStyle(env, term, &default_colors)) |content| {
+                    has_wide_chars |= content.has_wide;
+                }
+            } else {
+                _ = env.forwardLine(1);
+            }
+        }
+
+        // If there's anything left below the viewport, delete it
+        env.deleteRegion(env.point(), env.pointMax());
+
+        // Reset dirty state
+        const dirty_false: c_int = gt.DIRTY_FALSE;
+        _ = gt.c.ghostty_render_state_set(render_state, gt.RS_OPT_DIRTY, @ptrCast(&dirty_false));
+    }
+
+    if (dirty != gt.DIRTY_FALSE) {
+        if (has_wide_chars) {
+            _ = env.call2(env.intern("set"), emacs.sym.@"ghostel--has-wide-chars", env.t());
+        }
+    }
+}
+
 /// Redraw the terminal into the current Emacs buffer.
 ///
 /// Maintains a "growing buffer" model where the Emacs buffer contains
@@ -642,146 +718,56 @@ pub fn redraw(env: emacs.Env, term: *Terminal, force_full_arg: bool) void {
     var force_full = force_full_arg;
 
     // ---- Scrollback validity ------------------------------------------------
-    // There are three cases where we clear scrollback:
+    // There are two cases where we clear scrollback:
     // 1. It was explicitly requested through `rebuild_pending`
-    // 2. Libghostty scrollback shrunk in relation to the Emacs scrollback. This
-    //    can be due to reflow and similar things. Nothing we can patch up.
-    // 3. We had some scrollback but the scrollbar was reset from the parked
+    // 2. We had some scrollback but the scrollbar was reset from the parked
     //    MAX - 1 position. This indicates that libghostty cleared its
     //    scrollback and we follow after by clearing too.
-    const libghostty_sb = term.getScrollbackRows();
-    const scrollbar = term.getScrollbar() orelse return;
-    const scrollback_shrunk = libghostty_sb < term.scrollback_in_buffer;
+    var scrollbar = term.getScrollbar() orelse return;
     const scrollbar_reset = term.scrollback_in_buffer > 0 and scrollbar.len + scrollbar.offset == scrollbar.total;
-    if (term.rebuild_pending or scrollback_shrunk or scrollbar_reset) {
+    if (term.rebuild_pending or scrollbar_reset) {
         env.eraseBuffer();
         term.scrollback_in_buffer = 0;
         force_full = true;
         term.rebuild_pending = false;
     }
 
-    // Scroll libghostty viewport to active area for rendering
-    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
-
-    // Update render state from terminal
-    if (gt.c.ghostty_render_state_update(term.viewport_state, term.terminal) != gt.SUCCESS) {
-        return;
+    if (term.scrollback_in_buffer > 0) {
+        term.scrollViewport(gt.SCROLL_DELTA, 1);
+        scrollbar.offset += 1;
+        env.gotoChar(env.pointMax());
+        _ = env.forwardLine(-@as(i64, @intCast(scrollbar.len)));
+    } else {
+        term.scrollViewport(gt.SCROLL_TOP, 0);
+        scrollbar.offset = 0;
+        env.gotoChar(env.pointMin());
     }
 
-    // Resolve default colors once — used for both the scrollback append
-    // path and the viewport render path.  These always succeed (the
-    // render state always has resolved default colors), so batching is safe.
-    var default_fg = gt.ColorRgb{ .r = 204, .g = 204, .b = 204 };
-    var default_bg = gt.ColorRgb{ .r = 0, .g = 0, .b = 0 };
-    {
-        const color_keys = [_]gt.c.GhosttyRenderStateData{
-            gt.RS_DATA_COLOR_FOREGROUND,
-            gt.RS_DATA_COLOR_BACKGROUND,
-        };
-        var color_values = [_]?*anyopaque{
-            @ptrCast(&default_fg),
-            @ptrCast(&default_bg),
-        };
-        _ = gt.c.ghostty_render_state_get_multi(term.viewport_state, color_keys.len, &color_keys, @ptrCast(&color_values), null);
+    const offset_max = scrollbar.total - scrollbar.len;
+    const total_range = scrollbar.total - scrollbar.offset;
+    const num_viewports = (total_range + scrollbar.len - 1) / scrollbar.len;
+    var skip: usize = 0;
+    var rendered_rows: usize = 0;
+    for (0..num_viewports) |_| {
+        if (gt.c.ghostty_render_state_update(term.viewport_state, term.terminal) != gt.SUCCESS) {
+            return;
+        }
+        render(env, term, term.viewport_state, skip, force_full);
+        rendered_rows += (scrollbar.len - skip);
+
+        const max_step = offset_max - scrollbar.offset;
+        const step = @min(max_step, scrollbar.len);
+        skip = scrollbar.len - step;
+
+        scrollbar.offset += step;
+        term.scrollViewport(gt.SCROLL_DELTA, @intCast(step));
     }
+    term.scrollback_in_buffer += (rendered_rows - scrollbar.len);
 
     // Walk to the current viewport start
     env.gotoChar(env.pointMax());
     _ = env.forwardLine(-@as(i64, @intCast(term.rows)));
-
-    // ---- Scrolling detection ------------------------------------------------
-    // We use two methods of detecting scrolling:
-    // - If there is any scrollback, we position the viewport at MAX - 1. This
-    //   makes the viewport follow the scrollback so we can calculate the
-    //   distance it moved.
-    // - If we didn't have any scrollback before, the method above does not work
-    //   so we fall back to simply comparing the difference between libghostty
-    //   scrollback and Emacs scrollback.
-    var delta = term.getScrollbackRows() - term.scrollback_in_buffer;
-    if (term.scrollback_in_buffer > 0) {
-        delta = (scrollbar.total - scrollbar.len - 1) - scrollbar.offset;
-    }
-
-    // Transfer that amount of lines from libghostty's scrollback.
-    const inserted = insertScrollback(
-        env,
-        term,
-        delta,
-        default_fg,
-        default_bg,
-    );
-    term.scrollback_in_buffer += inserted;
     const viewport_start_int = env.extractInteger(env.point());
-
-    // Check dirty state.
-    // force_full overrides: the buffer may have been erased by scrollback
-    // sync / resize / rotation above, so we must rebuild even if
-    // libghostty considers the cells clean.
-    var dirty: c_int = gt.DIRTY_FALSE;
-    _ = gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_DIRTY, @ptrCast(&dirty));
-    var has_wide_chars: bool = false;
-
-    if (dirty != gt.DIRTY_FALSE or force_full) {
-        // Set buffer default face
-        var fg_hex: [7]u8 = undefined;
-        var bg_hex: [7]u8 = undefined;
-        _ = env.call2(
-            emacs.sym.@"ghostel--set-buffer-face",
-            env.makeString(formatColor(default_fg, &fg_hex)),
-            env.makeString(formatColor(default_bg, &bg_hex)),
-        );
-
-        // Get row iterator
-        if (gt.c.ghostty_render_state_get(term.viewport_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
-            return;
-        }
-
-        // Incremental redraw: only update dirty rows when possible.
-        // force_full bypasses partial mode to avoid stale rows after scrolls.
-        const partial = (!force_full and dirty == gt.DIRTY_PARTIAL);
-        if (!partial) {
-            // Wipe only the viewport region; scrollback stays intact.
-            env.deleteRegion(env.makeInteger(viewport_start_int), env.pointMax());
-        }
-
-        var row_count: usize = 0;
-        while (gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) {
-            defer row_count += 1;
-
-            if (partial) {
-                // Only process dirty rows
-                var row_dirty: bool = false;
-                _ = gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_DIRTY, @ptrCast(&row_dirty));
-                if (!row_dirty) {
-                    _ = env.forwardLine(1);
-                    continue;
-                }
-
-                // Delete line
-                env.deleteRegion(env.point(), env.lineBeginningPosition2());
-                // Clear per-row dirty flag
-                const row_clean: bool = false;
-                _ = gt.c.ghostty_render_state_row_set(term.row_iterator, gt.RS_ROW_OPT_DIRTY, @ptrCast(&row_clean));
-            }
-
-            if (insertAndStyle(env, term, default_fg, default_bg)) |content| {
-                has_wide_chars |= content.has_wide;
-            }
-        }
-
-        // If there's anything left below the viewport, delete it
-        env.deleteRegion(env.point(), env.pointMax());
-
-        // Reset dirty state
-        const dirty_false: c_int = gt.DIRTY_FALSE;
-        _ = gt.c.ghostty_render_state_set(term.viewport_state, gt.RS_OPT_DIRTY, @ptrCast(&dirty_false));
-    }
-
-    if (dirty != gt.DIRTY_FALSE) {
-        if (has_wide_chars) {
-            _ = env.call2(env.intern("set"), emacs.sym.@"ghostel--has-wide-chars", env.t());
-        }
-    }
 
     // Batch-fetch cursor style/visibility (always available).
     var cursor_visible: bool = true;

@@ -5,12 +5,17 @@ const vendored_emacs_module_dir = "vendor";
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const ghostty_optimize = b.option(
+        std.builtin.OptimizeMode,
+        "ghostty-optimize",
+        "Optimization mode for the ghostty dependency (defaults to the main optimize option)",
+    ) orelse optimize;
     const is_release = optimize != .Debug;
     const target_os = target.result.os.tag;
     const emacs_module_dir = resolveEmacsModuleDir(b);
     const ghostty_dep = b.dependency("ghostty", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = ghostty_optimize,
         .@"emit-lib-vt" = true,
     });
 

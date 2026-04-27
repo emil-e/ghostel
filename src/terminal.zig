@@ -14,8 +14,8 @@ terminal: gt.Terminal,
 /// Render state for incremental viewport updates.
 viewport_state: gt.RenderState,
 
-/// Render state for non-viewport rendering.
-scratch_state: gt.RenderState,
+/// Render state for scrollback tracking.
+scrollback_state: gt.RenderState,
 
 /// Reusable row iterator (populated during redraw).
 row_iterator: gt.RenderStateRowIterator,
@@ -79,11 +79,11 @@ pub fn init(cols: u16, rows: u16, max_scrollback: usize) !Self {
     }
     errdefer gt.c.ghostty_render_state_free(viewport_state);
 
-    var scratch_state: gt.RenderState = undefined;
-    if (gt.c.ghostty_render_state_new(null, &scratch_state) != gt.SUCCESS) {
+    var scrollback_state: gt.RenderState = undefined;
+    if (gt.c.ghostty_render_state_new(null, &scrollback_state) != gt.SUCCESS) {
         return error.RenderStateCreateFailed;
     }
-    errdefer gt.c.ghostty_render_state_free(scratch_state);
+    errdefer gt.c.ghostty_render_state_free(scrollback_state);
 
     var row_iterator: gt.RenderStateRowIterator = undefined;
     if (gt.c.ghostty_render_state_row_iterator_new(null, &row_iterator) != gt.SUCCESS) {
@@ -112,7 +112,7 @@ pub fn init(cols: u16, rows: u16, max_scrollback: usize) !Self {
     return .{
         .terminal = terminal,
         .viewport_state = viewport_state,
-        .scratch_state = scratch_state,
+        .scrollback_state = scrollback_state,
         .row_iterator = row_iterator,
         .row_cells = row_cells,
         .key_encoder = key_encoder,
@@ -129,7 +129,7 @@ pub fn deinit(self: *Self) void {
     gt.c.ghostty_render_state_row_cells_free(self.row_cells);
     gt.c.ghostty_render_state_row_iterator_free(self.row_iterator);
     gt.c.ghostty_render_state_free(self.viewport_state);
-    gt.c.ghostty_render_state_free(self.scratch_state);
+    gt.c.ghostty_render_state_free(self.scrollback_state);
     gt.c.ghostty_terminal_free(self.terminal);
 }
 
