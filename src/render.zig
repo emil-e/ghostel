@@ -110,7 +110,7 @@ fn readCellStyle(cells: gt.RenderStateRowCells, raw: gt.c.GhosttyCell) CellStyle
     }
 
     // Read style attributes
-    var gs: gt.Style = std.mem.zeroes(gt.Style);
+    var gs: gt.Style = undefined;
     gs.size = @sizeOf(gt.Style);
     if (gt.c.ghostty_render_state_row_cells_get(cells, gt.RS_CELLS_DATA_STYLE, @ptrCast(&gs)) == gt.SUCCESS) {
         style.bold = gs.bold;
@@ -567,27 +567,6 @@ fn positionCursorByCell(env: emacs.Env, term: *Terminal, cx: u16, cy: u16) bool 
     const max_chars = eol - pt;
     env.gotoCharN(pt + @min(char_count, max_chars));
     return true;
-}
-
-fn clearDirtyFlags(term: *Terminal, state: gt.RenderState) void {
-    var rs_opt: gt.RenderStateOption = undefined;
-    if (gt.c.ghostty_render_state_get(state, gt.RS_DATA_DIRTY, @ptrCast(&rs_opt)) != gt.SUCCESS) {
-        return;
-    }
-    if (rs_opt == gt.DIRTY_FALSE) {
-        return;
-    }
-
-    rs_opt = gt.DIRTY_FALSE;
-    _ = gt.c.ghostty_render_state_set(state, gt.RS_DATA_DIRTY, @ptrCast(&rs_opt));
-
-    if (gt.c.ghostty_render_state_get(state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
-        return;
-    }
-    while (gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) {
-        const dirty_false = false;
-        _ = gt.c.ghostty_render_state_row_set(term.row_iterator, gt.RS_ROW_OPT_DIRTY, @ptrCast(&dirty_false));
-    }
 }
 
 const BgFg = struct {
