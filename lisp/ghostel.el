@@ -1855,20 +1855,20 @@ stripped so the copied text matches the original terminal content."
 (defun ghostel--native-uri-at-pos (pos)
   "Returns the native OSC8 hyperlink URI at POS."
   (save-excursion
-	(goto-char pos)
-	(let* ((line (line-number-at-pos nil t))
-		   (total (line-number-at-pos (point-max) t))
-		   (row-from-bottom (- total line))
-		   (col (current-column)))
-	  (ghostel--native-uri-at ghostel--term row-from-bottom col))))
+    (goto-char pos)
+    (let* ((line (line-number-at-pos nil t))
+           (total (line-number-at-pos (point-max) t))
+           (row-from-bottom (- total line))
+           (col (current-column)))
+      (ghostel--native-uri-at ghostel--term row-from-bottom col))))
 
 (defun ghostel--uri-at-pos (pos)
   "Returns the URI at POS by returning the help-echo property if it's a string,
 otherwise fetches the native OSC8 URI at that position."
   (let ((help-echo (get-text-property pos 'help-echo)))
-	(if (stringp help-echo)
-		help-echo
-	  (ghostel--native-uri-at-pos pos))))
+    (if (stringp help-echo)
+        help-echo
+      (ghostel--native-uri-at-pos pos))))
 
 (defun ghostel--open-link (url)
   "Open URL, dispatching by scheme.
