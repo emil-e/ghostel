@@ -85,7 +85,7 @@ placement math the native module performs in `src/render.zig'."
   (when (and ghostel--term ghostel--term-rows)
     (let ((pos (ghostel--cursor-position ghostel--term)))
       (when pos
-        (let ((scrollback (max 0 (- (line-number-at-pos (point-max))
+        (let ((scrollback (max 0 (- (count-lines (point-min) (point-max))
                                     ghostel--term-rows))))
           (goto-char (point-min))
           (forward-line (+ scrollback (cdr pos)))
