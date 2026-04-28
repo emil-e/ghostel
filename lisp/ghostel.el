@@ -3321,7 +3321,7 @@ No-op when `ghostel--snap-requested' (user input overrides)."
                    (eq (window-buffer win) buffer))
           (ghostel--reconcile-saved-position win entry))))))
 
-(defun ghostel--anchor-window (win vs pt &optional exact-point)
+(defun ghostel--anchor-window (win vs pt)
   "Pin WIN to viewport-start VS and sync its point to PT.
 Also resets pixel vscroll (pixel-scroll-precision-mode may leave a
 partial offset that would clip the top line after a redraw)."
@@ -3400,8 +3400,7 @@ the candidate window does not jump while text is streaming in."
                                 (eq win preedit-window))))
                       (ghostel--anchor-window
                        win vs
-                       (if preedit-win-p preedit-point pt)
-                       preedit-win-p))
+                       (if preedit-win-p preedit-point pt)))
                   (ghostel--restore-scrollback-window
                    win (assq win non-anchored-states))))
               (when preedit-point
