@@ -2347,6 +2347,18 @@ native URI lookup when Emacs invokes it for tooltip display or clicking."
             (should (and he (string-prefix-p "fileref:" he)))
             (should (and he (string-suffix-p test-file he)))    ; no wrapper tail
             (should (and he (not (string-suffix-p (cdr wrap) he)))))))
+      ;; Tilde-prefixed paths are detected and linkified.
+      (let* ((tilde-path "~/.emacs.d/init.el:42")
+             (tilde-file (expand-file-name ".emacs.d/init.el" (expand-file-name "~"))))
+        ;; Existing tilde path is linkified.
+        (insert (format "Error at %s bad" tilde-path))
+        (cl-letf (((symbol-function 'file-exists-p)
+                   (lambda (f) (equal f tilde-file))))
+          (let ((ghostel-enable-url-detection t))
+            (ghostel--detect-urls))
+          (let ((he (find-fileref)))
+            (should (and he (string-prefix-p "fileref:" he)))
+            (should (and he (string-suffix-p ":42" he))))))
       ;; Bare filename without a slash must NOT match (avoids FS stat storms)
       (with-temp-buffer
         (setq default-directory (file-name-directory test-file))
@@ -8054,6 +8066,7 @@ COLORTERM, INSIDE_EMACS, …) plus pass-through LANG/LC_*."
     ghostel-test-delayed-redraw-defers-plain-link-detection
     ghostel-test-delayed-redraw-coalesces-plain-link-detection
     ghostel-test-detect-urls-allows-read-only-buffers
+    ghostel-test-url-detection
     ghostel-test-zero-delay-runs-plain-link-detection-synchronously
     ghostel-test-sentinel-cancels-plain-link-detection-timer
     ghostel-test-compile-prepare-buffer-sets-dir-before-mode

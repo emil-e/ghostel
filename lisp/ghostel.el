@@ -377,7 +377,7 @@ redraw.  Native OSC-8 hyperlinks remain applied during redraw."
   :type 'number)
 
 (defcustom ghostel-file-detection-path-regex
-  "[[:alnum:]_.-]*/[^] \t\n\r:\"<>(){}[`']+"
+  "[~[:alnum:]_.-]*/[^] \t\n\r:\"<>(){}[`']+"
   "Regex matching the PATH portion of a file:line[:col] reference.
 This is the middle of the full detection pattern; ghostel wraps it
 with a fixed leading path-boundary anchor (line start or any
@@ -386,10 +386,10 @@ is guaranteed to end in `:DIGITS'.
 
 The matched path is resolved against `default-directory'; linkification
 only applies when that file exists.  The default matches absolute
-paths, explicit `./' paths, and bare relative paths containing at
-least one `/' (e.g. compiler output like `src/main.rs').  Paths
-embedded in punctuation like `(/home/user/index.js:17:5)' are
-supported via the fixed anchor.
+paths, explicit `./' paths, tilde-prefixed paths like `~/file.el',
+and bare relative paths containing at least one `/' (e.g. compiler
+output like `src/main.rs').  Paths embedded in punctuation like
+`(/home/user/index.js:17:5)' are supported via the fixed anchor.
 
 Performance: each match triggers a filesystem check on every redraw.
 Broadening this pattern (for example to match bare `file.go' without
@@ -400,7 +400,7 @@ per-redraw scan stays cheap."
   :type 'regexp)
 
 (defconst ghostel--file-detection-leading-anchor
-  "\\(?:^\\|[^[:alnum:]_./-]\\)"
+  "\\(?:^\\|[^[:alnum:]_./~-]\\)"
   "Fixed anchor placed before `ghostel-file-detection-path-regex'.")
 
 (defconst ghostel--file-detection-tail
