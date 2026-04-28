@@ -276,6 +276,15 @@ pub fn getTotalRows(self: *Self) usize {
     return total;
 }
 
+/// Get the number of scrollback rows.
+pub fn getScrollbackRows(self: *Self) usize {
+    var scrollback: usize = 0;
+    if (gt.c.ghostty_terminal_get(self.terminal, gt.DATA_SCROLLBACK_ROWS, @ptrCast(&scrollback)) != gt.SUCCESS) {
+        return self.rows;
+    }
+    return scrollback;
+}
+
 /// Get the scrollbar state (total, offset, len).
 pub fn getScrollbar(self: *Self) ?gt.TerminalScrollbar {
     var sb: gt.TerminalScrollbar = undefined;

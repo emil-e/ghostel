@@ -731,14 +731,18 @@ pub fn redraw(env: emacs.Env, term: *Terminal, force_full_arg: bool) void {
     var force_full = force_full_arg;
 
     // ---- Scrollback validity ------------------------------------------------
-    // There are two cases where we clear scrollback:
+    // There are three cases where we clear scrollback:
     // 1. It was explicitly requested through `rebuild_pending`
     // 2. We had some scrollback but the scrollbar was reset from the parked
     //    MAX - 1 position. This indicates that libghostty cleared its
     //    scrollback and we follow after by clearing too.
+    // 3. We had some scrollback but the scrollbar ended up at offset = 0, which
+    //    means that we got so much scrolling that we scrolled all the way up
+    //    and do not know how much we missed.
     var scrollbar = term.getScrollbar() orelse return;
     const scrollbar_reset = term.scrollback_in_buffer > 0 and scrollbar.len + scrollbar.offset == scrollbar.total;
-    if (term.rebuild_pending or scrollbar_reset) {
+    const scrollbar_hit_cap = term.scrollback_in_buffer > 0 and scrollbar.offset == 0;
+    if (term.rebuild_pending or scrollbar_reset or scrollbar_hit_cap) {
         env.eraseBuffer();
         term.scrollback_in_buffer = 0;
         force_full = true;
@@ -791,6 +795,13 @@ pub fn redraw(env: emacs.Env, term: *Terminal, force_full_arg: bool) void {
     // scrollback rows.
     term.scrollback_in_buffer += (rendered_rows - scrollbar.len);
 
+    // Evict old scrollback if libghostty also did
+    const libghostty_scrollback = term.getScrollbackRows();
+    if (libghostty_scrollback < term.scrollback_in_buffer) {
+        env.gotoChar(env.pointMin());
+        _ = env.forwardLine(@as(i64, @intCast(term.scrollback_in_buffer - libghostty_scrollback)));
+        env.deleteRegion(env.pointMin(), env.point());
+        term.scrollback_in_buffer = libghostty_scrollback;
     }
 
     renderCursor(env, term);

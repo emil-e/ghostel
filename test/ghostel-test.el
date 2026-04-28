@@ -525,6 +525,55 @@ scrolling libghostty's viewport."
             (delete-process proc)))
       (kill-buffer buf))))
 
+(ert-deftest ghostel-test-scrollback-eviction-chunked ()
+  "Scrollback eviction works when writing happens in little chunks with
+renders in between.  Writes a small batch, renders, then writes a large
+batch across many small writes interspersed with renders.  The accumulated
+scrollback from the second phase must evict the first phase from the
+Emacs buffer."
+  (let ((buf (generate-new-buffer " *ghostel-test-sb-evict*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 6 80 1024))
+                 (inhibit-read-only t))
+            ;; Write a small initial batch
+            (dotimes (i 20)
+              (ghostel--write-input term (format "early-%05d\r\n" i)))
+            (ghostel--redraw term t)
+            ;; Write a large batch in many small chunks with renders in between
+            (dotimes (x 200)
+              (dotimes (i 100)
+                (ghostel--write-input term (format "late-%05d\r\n" i)))
+              (ghostel--redraw term t))
+            (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p "late-" content))
+              (should-not (string-match-p "early-" content)))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-scrollback-eviction-bulk ()
+  "Scrollback eviction works when a single large write pushes all rows
+out of libghostty's scrollback cap at once.  Writes a small batch,
+renders, then writes a massive amount in one go that gets evicted in
+one fell swoop.  The second redraw must evict the first-batch rows from
+the Emacs buffer."
+  (let ((buf (generate-new-buffer " *ghostel-test-sb-evict*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 6 80 1024))
+                 (inhibit-read-only t))
+            ;; Write a small initial batch
+            (dotimes (i 20)
+              (ghostel--write-input term (format "early-%05d\r\n" i)))
+            (ghostel--redraw term t)
+            ;; Write a huge amount in one shot
+            (dotimes (i 200000)
+              (ghostel--write-input term (format "late-%05d\r\n" i)))
+            (ghostel--redraw term t)
+            (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p "late-" content))
+              (should-not (string-match-p "early-" content)))))
+      (kill-buffer buf))))
+
 (ert-deftest ghostel-test-no-stale-lines-in-scrollback ()
   "Rows that have been materialized in a previous render and are then modified
 and scrolled out in a single write should not scroll out the stale row."
