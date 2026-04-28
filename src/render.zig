@@ -643,6 +643,53 @@ pub fn render(env: emacs.Env, term: *Terminal, render_state: gt.RenderState, ski
     }
 }
 
+pub fn renderCursor(env: emacs.Env, term: *Terminal) void {
+
+    // Walk to the current viewport start
+    env.gotoChar(env.pointMax());
+    _ = env.forwardLine(-@as(i64, @intCast(term.rows)));
+    const viewport_start_int = env.extractInteger(env.point());
+
+    // Batch-fetch cursor style/visibility (always available).
+    var cursor_visible: bool = true;
+    var cursor_style: c_int = gt.CURSOR_BLOCK;
+    {
+        const cursor_keys = [_]gt.c.GhosttyRenderStateData{
+            gt.RS_DATA_CURSOR_VISIBLE,
+            gt.RS_DATA_CURSOR_VISUAL_STYLE,
+        };
+        var cursor_values = [_]?*anyopaque{
+            @ptrCast(&cursor_visible),
+            @ptrCast(&cursor_style),
+        };
+        _ = gt.c.ghostty_render_state_get_multi(term.render_state, cursor_keys.len, &cursor_keys, @ptrCast(&cursor_values), null);
+    }
+
+    // Position cursor (viewport-relative row -> absolute line).
+    // X/Y are only valid when HAS_VALUE is true, so query separately
+    // to avoid stopping the style batch above on NO_VALUE.
+    var cursor_has_value: bool = false;
+    _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_HAS_VALUE, @ptrCast(&cursor_has_value));
+    if (cursor_has_value) {
+        var cx: u16 = 0;
+        var cy: u16 = 0;
+        _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_X, @ptrCast(&cx));
+        _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_Y, @ptrCast(&cy));
+
+        env.gotoCharN(viewport_start_int);
+        _ = env.forwardLine(@as(i64, cy));
+        if (!positionCursorByCell(env, term, cx, cy)) {
+            env.moveToColumn(@as(i64, cx));
+        }
+    }
+
+    _ = env.call2(
+        emacs.sym.@"ghostel--set-cursor-style",
+        env.makeInteger(@as(i64, cursor_style)),
+        if (cursor_visible) env.t() else env.nil(),
+    );
+}
+
 /// Redraw the terminal into the current Emacs buffer.
 ///
 /// The Emacs buffer is a permanent record: all materialized scrollback sits
@@ -744,49 +791,9 @@ pub fn redraw(env: emacs.Env, term: *Terminal, force_full_arg: bool) void {
     // scrollback rows.
     term.scrollback_in_buffer += (rendered_rows - scrollbar.len);
 
-    // Walk to the current viewport start
-    env.gotoChar(env.pointMax());
-    _ = env.forwardLine(-@as(i64, @intCast(term.rows)));
-    const viewport_start_int = env.extractInteger(env.point());
-
-    // Batch-fetch cursor style/visibility (always available).
-    var cursor_visible: bool = true;
-    var cursor_style: c_int = gt.CURSOR_BLOCK;
-    {
-        const cursor_keys = [_]gt.c.GhosttyRenderStateData{
-            gt.RS_DATA_CURSOR_VISIBLE,
-            gt.RS_DATA_CURSOR_VISUAL_STYLE,
-        };
-        var cursor_values = [_]?*anyopaque{
-            @ptrCast(&cursor_visible),
-            @ptrCast(&cursor_style),
-        };
-        _ = gt.c.ghostty_render_state_get_multi(term.render_state, cursor_keys.len, &cursor_keys, @ptrCast(&cursor_values), null);
     }
 
-    // Position cursor (viewport-relative row -> absolute line).
-    // X/Y are only valid when HAS_VALUE is true, so query separately
-    // to avoid stopping the style batch above on NO_VALUE.
-    var cursor_has_value: bool = false;
-    _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_HAS_VALUE, @ptrCast(&cursor_has_value));
-    if (cursor_has_value) {
-        var cx: u16 = 0;
-        var cy: u16 = 0;
-        _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_X, @ptrCast(&cx));
-        _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_Y, @ptrCast(&cy));
-
-        env.gotoCharN(viewport_start_int);
-        _ = env.forwardLine(@as(i64, cy));
-        if (!positionCursorByCell(env, term, cx, cy)) {
-            env.moveToColumn(@as(i64, cx));
-        }
-    }
-
-    _ = env.call2(
-        emacs.sym.@"ghostel--set-cursor-style",
-        env.makeInteger(@as(i64, cursor_style)),
-        if (cursor_visible) env.t() else env.nil(),
-    );
+    renderCursor(env, term);
 
     // Update working directory from OSC 7
     if (term.getPwd()) |pwd| {
