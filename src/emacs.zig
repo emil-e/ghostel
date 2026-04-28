@@ -224,6 +224,14 @@ pub const Env = struct {
         return self.call0(sym.@"line-end-position");
     }
 
+    pub fn lineBeginningPosition2(self: Env) Value {
+        return self.call1(sym.@"line-beginning-position", self.makeInteger(2));
+    }
+
+    pub fn pointMin(self: Env) Value {
+        return self.call0(sym.@"point-min");
+    }
+
     pub fn pointMax(self: Env) Value {
         return self.call0(sym.@"point-max");
     }
@@ -300,12 +308,15 @@ pub const Sym = struct {
     @"move-to-column": Value,
     @"erase-buffer": Value,
     @"line-end-position": Value,
+    @"line-beginning-position": Value,
+    @"point-min": Value,
     @"point-max": Value,
     @"delete-region": Value,
     @"char-before": Value,
     @"mark-marker": Value,
     @"marker-position": Value,
     @"set-marker": Value,
+    ding: Value,
 
     // Text property names
     face: Value,
@@ -330,7 +341,8 @@ pub const Sym = struct {
     @"ghostel--flush-output": Value,
     @"ghostel--set-title": Value,
     @"ghostel--debug-log-vt": Value,
-    ding: Value,
+    @"ghostel--native-uri-at": Value,
+    @"ghostel--native-link-help-echo": Value,
 };
 
 pub var sym: Sym = undefined;

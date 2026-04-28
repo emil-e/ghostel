@@ -3,10 +3,10 @@
 ;;; Commentary:
 
 ;; Run with:
-;;   `emacs --batch -Q -L . -l ert -l test/ghostel-test.el -f ghostel-test-run'
+;;   `emacs --batch -Q -L lisp -l ert -l test/ghostel-test.el -f ghostel-test-run'
 ;;
 ;; Pure Elisp tests only (no native module):
-;;   `emacs --batch -Q -L . -l ert -l test/ghostel-test.el -f ghostel-test-run-elisp'
+;;   `emacs --batch -Q -L lisp -l ert -l test/ghostel-test.el -f ghostel-test-run-elisp'
 
 ;;; Code:
 
@@ -235,10 +235,8 @@ This is the vterm-style growing-buffer model that lets `isearch' and
               (should (string-match-p "row-05" content))
               ;; The most recent row is on the active screen.
               (should (string-match-p "row-11" content)))
-            ;; 12 distinct rows made it into the buffer.  The trailing
-            ;; empty cursor row is trimmed to nothing by the renderer
-            ;; and therefore contributes no additional line.
-            (should (= 12 (count-lines (point-min) (point-max))))))
+            ;; 12 distinct rows made it into the buffer + trailing newline
+            (should (= 13 (count-lines (point-min) (point-max))))))
       (kill-buffer buf))))
 
 (ert-deftest ghostel-test-scrollback-bootstrap-not-blank ()
@@ -353,6 +351,100 @@ attached."
                              (get-text-property (- url-pos 19) 'help-echo))))))
       (kill-buffer buf))))
 
+;; -----------------------------------------------------------------------
+;; Tests: OSC 8 on-demand URI lookup (native)
+;; -----------------------------------------------------------------------
+
+(ert-deftest ghostel-test-osc8-renders-native-link-handler ()
+  "OSC8 links set `help-echo' to the native handler symbol, not a URI string.
+After the refactor, render stores `ghostel--native-link-help-echo' as the
+`help-echo' text property so Emacs calls it lazily instead of embedding
+the URI in the buffer."
+  (let ((buf (generate-new-buffer " *ghostel-test-osc8-render*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (let* ((term (ghostel--new 5 80 1000))
+                 (ghostel--term term)
+                 (ghostel--term-rows 5)
+                 (inhibit-read-only t))
+            (ghostel--write-input term "\e]8;;https://example.com\e\\link text\e]8;;\e\\")
+            (ghostel--redraw term t)
+            (goto-char (point-min))
+            (let* ((end (search-forward "link text" nil t))
+                   (link-pos (- end (length "link text"))))
+              (should end)
+              (should (eq #'ghostel--native-link-help-echo  ; function symbol, not string URI
+                          (get-text-property link-pos 'help-echo)))
+              (should (keymapp (get-text-property link-pos 'keymap))))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-osc8-uri-at-pos-returns-uri ()
+  "`ghostel--native-uri-at-pos' queries libghostty and returns the OSC8 URI."
+  (let ((buf (generate-new-buffer " *ghostel-test-osc8-uri*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (let* ((term (ghostel--new 5 80 1000))
+                 (ghostel--term term)
+                 (ghostel--term-rows 5)
+                 (inhibit-read-only t))
+            (ghostel--write-input term "\e]8;;https://example.com\e\\link text\e]8;;\e\\")
+            (ghostel--redraw term t)
+            (goto-char (point-min))
+            (let* ((end (search-forward "link text" nil t))
+                   (link-pos (- end (length "link text"))))
+              (should end)
+              (should (equal "https://example.com"
+                             (ghostel--native-uri-at-pos link-pos))))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-osc8-uri-at-pos-nil-outside-link ()
+  "`ghostel--native-uri-at-pos' returns nil or empty for a non-link cell."
+  (let ((buf (generate-new-buffer " *ghostel-test-osc8-nolink*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (let* ((term (ghostel--new 5 80 1000))
+                 (ghostel--term term)
+                 (ghostel--term-rows 5)
+                 (inhibit-read-only t))
+            (ghostel--write-input term "plain text")
+            (ghostel--redraw term t)
+            (goto-char (point-min))
+            (let ((uri (ghostel--native-uri-at-pos (point))))
+              (should (or (null uri) (string= "" uri))))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-osc8-uri-at-pos-two-links ()
+  "`ghostel--native-uri-at-pos' returns the correct URI for each of two links."
+  (let ((buf (generate-new-buffer " *ghostel-test-osc8-two*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (let* ((term (ghostel--new 5 80 1000))
+                 (ghostel--term term)
+                 (ghostel--term-rows 5)
+                 (inhibit-read-only t))
+            (ghostel--write-input
+             term
+             (concat "\e]8;;https://first.example\e\\first\e]8;;\e\\"
+                     " and "
+                     "\e]8;;https://second.example\e\\second\e]8;;\e\\"))
+            (ghostel--redraw term t)
+            (goto-char (point-min))
+            (let* ((first-end (search-forward "first" nil t))
+                   (first-pos (- first-end (length "first")))
+                   (second-end (search-forward "second" nil t))
+                   (second-pos (- second-end (length "second"))))
+              (should first-end)
+              (should second-end)
+              (should (equal "https://first.example"
+                             (ghostel--native-uri-at-pos first-pos)))
+              (should (equal "https://second.example"
+                             (ghostel--native-uri-at-pos second-pos))))))
+      (kill-buffer buf))))
+
 (ert-deftest ghostel-test-scrollback-grows-incrementally ()
   "Successive redraws append newly-scrolled-off rows without losing history."
   (let ((buf (generate-new-buffer " *ghostel-test-sb-incr*")))
@@ -377,54 +469,6 @@ attached."
               (should (string-match-p "first-07" content))
               (should (string-match-p "second-00" content))
               (should (string-match-p "second-05" content)))))
-      (kill-buffer buf))))
-
-(ert-deftest ghostel-test-scrollback-rotation-rebuild ()
-  "Verify cap rotation triggers a rebuild so the buffer reflects libghostty.
-The test fills libghostty past its scrollback cap with EARLY markers,
-redraws once so the buffer matches the current libghostty state, then
-writes a much bigger batch of LATE markers (without an intervening
-redraw).  When the next redraw runs, libghostty's `total_rows' is
-plateaued at the cap so the normal delta-detection sees nothing to do
-— the rotation-detect path must kick in, notice the first scrollback
-row's hash has changed, erase the buffer, and let the bootstrap fetch
-re-sync from libghostty so the buffer reflects the LATE rows."
-  (let ((buf (generate-new-buffer " *ghostel-test-sb-rotate*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (let* (;; 4 KB cap empirically holds ~920 rows of short content
-                 ;; in libghostty's compact storage.
-                 (term (ghostel--new 5 80 (* 4 1024)))
-                 (inhibit-read-only t))
-            ;; Phase 1: write 5000 EARLY rows. libghostty's scrollback
-            ;; saturates at ~920 rows so the surviving rows are
-            ;; early-04080..early-04999 (the most recent 920 of 5000).
-            (dotimes (i 5000)
-              (ghostel--write-input term (format "early-%05d\r\n" i)))
-            (ghostel--redraw term t)
-            ;; After this redraw, buffer's scrollback_in_buffer matches
-            ;; libghostty's count (~920) and contains those high-numbered
-            ;; early rows.
-            (let ((content (buffer-substring-no-properties (point-min) (point-max))))
-              (should (string-match-p "early-04999" content)))
-            ;; Phase 2: write 5000 LATE rows WITHOUT redrawing in
-            ;; between. libghostty rotates: every new write evicts an
-            ;; early row and pushes a late row. After 5000 writes, all
-            ;; survivors are late-* (since 5000 > 920 cap).
-            (dotimes (i 5000)
-              (ghostel--write-input term (format "late-%05d\r\n" i)))
-            ;; Final redraw: total_rows hasn't changed (libghostty is
-            ;; still at the cap) but the content has fully rotated.
-            ;; Without rotation-detect this would be a no-op and the
-            ;; buffer would still show early-* rows.
-            (ghostel--redraw term t)
-            (let ((content (buffer-substring-no-properties (point-min) (point-max))))
-              ;; Late rows must be present (libghostty kept the most
-              ;; recent ones, the rebuild fetched them into the buffer).
-              (should (string-match-p "late-04999" content))
-              ;; Early rows must NOT be present anywhere — libghostty
-              ;; evicted them AND the rebuild flushed our stale copy.
-              (should-not (string-match-p "early-" content)))))
       (kill-buffer buf))))
 
 ;; -----------------------------------------------------------------------
@@ -479,6 +523,25 @@ scrolling libghostty's viewport."
             (let ((content (buffer-substring-no-properties (point-min) (point-max))))
               (should (string-match-p "clear-test-[0-9]+" content)))
             (delete-process proc)))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-no-stale-lines-in-scrollback ()
+  "Rows that have been materialized in a previous render and are then modified
+and scrolled out in a single write should not scroll out the stale row."
+  (let ((buf (generate-new-buffer " *ghostel-test-sb-buffer*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 1000))
+                 (inhibit-read-only t))
+            (ghostel--write-input term "wrong\r\n")
+            (ghostel--redraw term t)
+            (ghostel--write-input term "\e[Hfoobar\e[5;0Hyolo\r\n")
+            (ghostel--redraw term t)
+            (goto-char (point-min))
+            (let ((line (buffer-substring-no-properties (line-beginning-position)
+                                                        (line-end-position))))
+              ;; Should now equal "foobar", not "wrong"
+              (should (string= line "foobar")))))
       (kill-buffer buf))))
 
 ;; -----------------------------------------------------------------------
@@ -1977,9 +2040,7 @@ first real focus event."
               (should (string-match-p "line-B" content))       ; row1 preserved
               (should (string-match-p "line-C updated" content))) ; row2 updated
 
-            ;; 3 content rows + 2 trailing blank rows trimmed to
-            ;; empty strings = 4 newlines = 4 lines counted.
-            (should (equal 4 (count-lines (point-min) (point-max))))))
+            (should (equal 5 (count-lines (point-min) (point-max))))))
       (kill-buffer buf))))
 
 ;; -----------------------------------------------------------------------
@@ -2073,15 +2134,55 @@ first real focus event."
   (should (lookup-key ghostel-link-map [mouse-1]))         ; mouse-1 bound in link map
   (should (lookup-key ghostel-link-map (kbd "RET")))       ; RET bound in link map
   (should (commandp #'ghostel-open-link-at-point))         ; open-link-at-point is interactive
-  ;; Test that help-echo property is read correctly
-  (with-temp-buffer
-    (insert "click here")
-    (put-text-property 1 11 'help-echo "https://example.com")
-    (goto-char 5)
-    (should (equal "https://example.com"                   ; help-echo at point
-                   (get-text-property (point) 'help-echo))))
   (should (null (ghostel--open-link nil)))                 ; open-link returns nil for empty
   (should (null (ghostel--open-link 42))))                 ; open-link returns nil for non-string
+
+(ert-deftest ghostel-test-uri-at-pos-prefers-string-help-echo ()
+  "`ghostel--uri-at-pos' returns a string `help-echo' without calling native.
+Plain-text link detection stores URIs as strings; the native path must
+not be reached when the property is already a string."
+  (with-temp-buffer
+    (insert "click here")
+    (put-text-property 1 11 'help-echo "https://static.example.com")
+    (goto-char 5)
+    (let (native-called)
+      (cl-letf (((symbol-function 'ghostel--native-uri-at-pos)
+                 (lambda (_) (setq native-called t) "should-not-reach")))
+        (should (equal "https://static.example.com"
+                       (ghostel--uri-at-pos (point))))
+        (should-not native-called)))))
+
+(ert-deftest ghostel-test-uri-at-pos-calls-native-for-function-help-echo ()
+  "`ghostel--uri-at-pos' delegates to native when `help-echo' is a function.
+OSC8 links set `help-echo' to the symbol `ghostel--native-link-help-echo';
+`ghostel--uri-at-pos' must call `ghostel--native-uri-at-pos' in that case."
+  (with-temp-buffer
+    (insert "click here")
+    (put-text-property 1 11 'help-echo #'ghostel--native-link-help-echo)
+    (goto-char 5)
+    (cl-letf (((symbol-function 'ghostel--native-uri-at-pos)
+               (lambda (_pos) "native-uri")))
+      (should (equal "native-uri" (ghostel--uri-at-pos (point)))))))
+
+(ert-deftest ghostel-test-native-link-help-echo-calls-uri-at-pos ()
+  "`ghostel--native-link-help-echo' delegates to `ghostel--native-uri-at-pos'.
+The help-echo handler stored on OSC8 link text-properties must call the
+native URI lookup when Emacs invokes it for tooltip display or clicking."
+  (let ((buf (generate-new-buffer " *ghostel-test-echo-handler*"))
+        (orig-buf (window-buffer (selected-window))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buf)
+          (with-current-buffer buf
+            (insert "test content")
+            (cl-letf (((symbol-function 'ghostel--native-uri-at-pos)
+                       (lambda (pos) (format "uri-at-%d" pos))))
+              (should (equal "uri-at-1"
+                             (ghostel--native-link-help-echo
+                              (selected-window) nil 1))))))
+      (when (buffer-live-p orig-buf)
+        (set-window-buffer (selected-window) orig-buf))
+      (kill-buffer buf))))
 
 (ert-deftest ghostel-test-url-detection ()
   "Test automatic URL detection in plain text."
@@ -2100,14 +2201,14 @@ first real focus event."
     (let ((ghostel-enable-url-detection nil))
       (ghostel--detect-urls))
     (should (null (get-text-property 7 'help-echo))))      ; url detection disabled
-  ;; Skips existing OSC 8 links
+  ;; Skips existing OSC 8 links (help-echo is the native handler function symbol)
   (with-temp-buffer
     (insert "Visit https://other.com for info")
-    (put-text-property 7 26 'help-echo "https://osc8.example.com")
+    (put-text-property 7 26 'help-echo #'ghostel--native-link-help-echo)
     (let ((ghostel-enable-url-detection t))
       (ghostel--detect-urls))
-    (should (equal "https://osc8.example.com"              ; osc8 link preserved
-                   (get-text-property 7 'help-echo))))
+    (should (eq #'ghostel--native-link-help-echo           ; osc8 handler not overwritten
+                (get-text-property 7 'help-echo))))
   ;; URL not ending in punctuation
   (with-temp-buffer
     (insert "See https://example.com/path.")
@@ -3455,6 +3556,7 @@ spawns `sh -c COMMAND' directly, so the shell parses the paragraph
 normally."
   (skip-unless (file-executable-p "/bin/sh"))
   (let* ((buf-name "*ghostel-test-multiline-compile*")
+		 (shell-file-name "/bin/sh")
          (script "for i in 1 2 3; do\n  echo line-$i\ndone\nexit 7")
          (inhibit-message t)
          (save-some-buffers-default-predicate (lambda () nil)))
@@ -3861,7 +3963,7 @@ Emacs auto-scrolls to make point visible."
             ;; redraw anchored `window-start' at the viewport.
             (let ((vp-before (save-excursion
                                (goto-char (point-max))
-                               (forward-line -9)
+                               (forward-line -10)
                                (line-beginning-position))))
               (set-window-start (selected-window) vp-before t))
             (setq ghostel--force-next-redraw t)
@@ -3878,7 +3980,7 @@ Emacs auto-scrolls to make point visible."
                    (wp (window-point (selected-window)))
                    (vp-start (save-excursion
                                (goto-char (point-max))
-                               (forward-line -5)
+                               (forward-line -6)
                                (line-beginning-position))))
               (should (= ws vp-start))
               (should (>= wp vp-start)))))
@@ -4739,7 +4841,7 @@ scrollback positions."
             ;; (not the first blank line in the buffer).
             (let ((target (save-excursion
                             (goto-char (point-max))
-                            (forward-line -25)
+                            (forward-line -26)
                             (line-beginning-position))))
               (set-window-start (selected-window) target t)
               (let ((pre-key (ghostel--line-key target)))
@@ -4835,8 +4937,6 @@ to restore to a missing line."
                               (list '("scroll-10") '("scroll-11") 0))))
             (setq ghostel--last-anchor-position 42)
             (cl-letf (((symbol-function 'ghostel--write-input)
-                       (lambda (&rest _) nil))
-                      ((symbol-function 'ghostel--scroll-bottom)
                        (lambda (&rest _) nil))
                       ((symbol-function 'ghostel--invalidate) #'ignore))
               (setq ghostel--process nil)
@@ -6242,11 +6342,8 @@ redraw and produce visible flicker, so point is left alone."
         (ghostel--force-next-redraw nil)
         (ghostel--snap-requested nil)
         (ghostel-scroll-on-input t)
-        (scroll-bottom-called nil)
         (sent-key nil))
-    (cl-letf (((symbol-function 'ghostel--scroll-bottom)
-               (lambda (_term) (setq scroll-bottom-called t)))
-              ((symbol-function 'ghostel--send-string)
+    (cl-letf (((symbol-function 'ghostel--send-string)
                (lambda (str) (setq sent-key str))))
       (with-temp-buffer
         (insert "scrollback\nscrollback\nscrollback\n")
@@ -6254,7 +6351,6 @@ redraw and produce visible flicker, so point is left alone."
         (let ((last-command-event ?a))
           (cl-letf (((symbol-function 'this-command-keys) (lambda () "a")))
             (ghostel--self-insert)))
-        (should scroll-bottom-called)
         (should ghostel--force-next-redraw)
         (should ghostel--snap-requested)
         (should (equal "a" sent-key))))))
@@ -6264,18 +6360,14 @@ redraw and produce visible flicker, so point is left alone."
   (let ((ghostel--term 'fake)
         (ghostel--force-next-redraw nil)
         (ghostel--snap-requested nil)
-        (ghostel-scroll-on-input t)
-        (scroll-bottom-called nil))
-    (cl-letf (((symbol-function 'ghostel--scroll-bottom)
-               (lambda (_term) (setq scroll-bottom-called t)))
-              ((symbol-function 'ghostel--send-encoded)
+        (ghostel-scroll-on-input t))
+    (cl-letf (((symbol-function 'ghostel--send-encoded)
                (lambda (_key _mods &optional _utf8) nil)))
       (with-temp-buffer
         (insert "scrollback\nscrollback\nscrollback\n")
         (goto-char (point-min))
         (let ((last-command-event (aref (kbd "<return>") 0)))
           (ghostel--send-event))
-        (should scroll-bottom-called)
         (should ghostel--force-next-redraw)
         (should ghostel--snap-requested)))))
 
@@ -6283,11 +6375,8 @@ redraw and produce visible flicker, so point is left alone."
   "Self-insert does not scroll when `ghostel-scroll-on-input' is nil."
   (let ((ghostel--term 'fake)
         (ghostel--force-next-redraw nil)
-        (ghostel-scroll-on-input nil)
-        (scroll-bottom-called nil))
-    (cl-letf (((symbol-function 'ghostel--scroll-bottom)
-               (lambda (_term) (setq scroll-bottom-called t)))
-              ((symbol-function 'ghostel--send-string)
+        (ghostel-scroll-on-input nil))
+    (cl-letf (((symbol-function 'ghostel--send-string)
                (lambda (_str) nil)))
       (with-temp-buffer
         (insert "scrollback\nscrollback\nscrollback\n")
@@ -6296,7 +6385,6 @@ redraw and produce visible flicker, so point is left alone."
           (cl-letf (((symbol-function 'this-command-keys) (lambda () "a")))
             (let ((last-command-event ?a))
               (ghostel--self-insert)))
-          (should-not scroll-bottom-called)
           (should-not ghostel--force-next-redraw)
           (should (= (point) start)))))))
 
@@ -6307,11 +6395,8 @@ redraw and produce visible flicker, so point is left alone."
         (ghostel--force-next-redraw nil)
         (ghostel--snap-requested nil)
         (ghostel-scroll-on-input t)
-        (scroll-bottom-called nil)
         (sent-text nil))
-    (cl-letf (((symbol-function 'ghostel--scroll-bottom)
-               (lambda (_term) (setq scroll-bottom-called t)))
-              ((symbol-function 'ghostel--bracketed-paste-p)
+    (cl-letf (((symbol-function 'ghostel--bracketed-paste-p)
                (lambda () nil))
               ((symbol-function 'process-live-p)
                (lambda (_p) t))
@@ -6321,7 +6406,6 @@ redraw and produce visible flicker, so point is left alone."
         (insert "scrollback\nscrollback\nscrollback\n")
         (goto-char (point-min))
         (ghostel--paste-text "hello")
-        (should scroll-bottom-called)
         (should ghostel--force-next-redraw)
         (should ghostel--snap-requested)
         (should (equal "hello" sent-text))))))
@@ -8062,7 +8146,10 @@ COLORTERM, INSIDE_EMACS, …) plus pass-through LANG/LC_*."
     ghostel-test-eshell/ghostel-dispatches-to-exec-visual
     ghostel-test-terminfo-directory-finds-bundled
     ghostel-test-debug-keypress-renders-capture
-    ghostel-test-debug-info-environment-section)
+    ghostel-test-debug-info-environment-section
+    ghostel-test-uri-at-pos-prefers-string-help-echo
+    ghostel-test-uri-at-pos-calls-native-for-function-help-echo
+    ghostel-test-native-link-help-echo-calls-uri-at-pos)
   "Tests that require only Elisp (no native module).")
 
 (defun ghostel-test-run-elisp ()

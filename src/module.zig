@@ -35,7 +35,6 @@ export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int
     env.bindFunction("ghostel--get-title", 1, 1, &fnGetTitle, "Get the terminal title.\n\n(ghostel--get-title TERM)");
     env.bindFunction("ghostel--get-pwd", 1, 1, &fnGetPwd, "Get the terminal's working directory from OSC 7.\n\n(ghostel--get-pwd TERM)");
     env.bindFunction("ghostel--redraw", 1, 2, &fnRedraw, "Redraw the terminal into the current buffer.\n\n(ghostel--redraw TERM &optional FULL)");
-    env.bindFunction("ghostel--scroll-bottom", 1, 1, &fnScrollBottom, "Scroll the terminal viewport to the bottom.\n\n(ghostel--scroll-bottom TERM)");
     env.bindFunction("ghostel--encode-key", 3, 4, &fnEncodeKey, "Encode a key event using the terminal's key encoder.\n\n(ghostel--encode-key TERM KEY MODS &optional UTF8)");
     env.bindFunction("ghostel--mouse-event", 6, 6, &fnMouseEvent, "Send a mouse event to the terminal.\n\n(ghostel--mouse-event TERM ACTION BUTTON ROW COL MODS)");
     env.bindFunction("ghostel--focus-event", 2, 2, &fnFocusEvent, "Send a focus event to the terminal.\n\n(ghostel--focus-event TERM GAINED)");
@@ -44,14 +43,13 @@ export fn emacs_module_init(runtime: *c.struct_emacs_runtime) callconv(.c) c_int
     env.bindFunction("ghostel--mode-enabled", 2, 2, &fnModeEnabled, "Return t if terminal DEC private MODE is enabled.\n\n(ghostel--mode-enabled TERM MODE)");
     env.bindFunction("ghostel--alt-screen-p", 1, 1, &fnAltScreen, "Return t if terminal is on the alternate screen buffer.\n\n(ghostel--alt-screen-p TERM)");
     env.bindFunction("ghostel--cursor-position", 1, 1, &fnCursorPosition, "Return terminal cursor position as (COL . ROW), 0-indexed.\n\n(ghostel--cursor-position TERM)");
-    env.bindFunction("ghostel--cursor-pending-wrap-p", 1, 1, &fnCursorPendingWrap, "Return t if the cursor is in pending-wrap state.\n\n(ghostel--cursor-pending-wrap-p TERM)");
-    env.bindFunction("ghostel--cursor-on-empty-row-p", 1, 1, &fnCursorOnEmptyRow, "Return t if the cursor row has no written cells or styled cells.\n\n(ghostel--cursor-on-empty-row-p TERM)");
     env.bindFunction("ghostel--debug-state", 1, 1, &fnDebugState, "Return debug info about terminal/render state.\n\n(ghostel--debug-state TERM)");
     env.bindFunction("ghostel--debug-feed", 2, 2, &fnDebugFeed, "Feed STR to terminal and return first row + cursor.\n\n(ghostel--debug-feed TERM STR)");
     env.bindFunction("ghostel--copy-all-text", 1, 1, &fnCopyAllText, "Return entire scrollback as plain text string.\n\n(ghostel--copy-all-text TERM)");
     env.bindFunction("ghostel--module-version", 0, 0, &fnModuleVersion, "Return the native module version string.\n\n(ghostel--module-version)");
     env.bindFunction("ghostel--enable-vt-log", 0, 0, &fnEnableVtLog, "Enable libghostty internal log routing to *ghostel-debug*.\n\n(ghostel--enable-vt-log)");
     env.bindFunction("ghostel--disable-vt-log", 0, 0, &fnDisableVtLog, "Disable libghostty internal log routing.\n\n(ghostel--disable-vt-log)");
+    env.bindFunction("ghostel--native-uri-at", 3, 3, &fnUriAt, "Get URI at ROW-from-bottom and COL.\n\n(ghostel--native-uri-at TERM ROW COL)");
 
     emacs.initSymbols(env);
     env.provide("ghostel-module");
@@ -183,23 +181,6 @@ fn fnWriteInput(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
         term.vtWrite(raw[seg_start..]);
     }
     term.last_input_was_cr = prev_was_cr;
-
-    // Detect CSI 3 J (erase scrollback). libghostty processes it and clears
-    // its scrollback, but provides no notification. Set rebuild_pending so the
-    // next redraw erases the Emacs buffer and re-fetches from libghostty.
-    // The flag is necessary because CSI 3 J followed by enough new output to
-    // restore the same scrollback depth is undetectable by count or hash alone.
-    //
-    // This is a stateless substring scan over a single write, so it misses:
-    // (1) sequences split across two writes (ESC in one, "[3J" in the next);
-    // (2) non-canonical forms — parameter padding like `\x1B[03J`, or the
-    //     8-bit C1 form `\x9B3J`.
-    // libghostty's stateful VT parser still clears its scrollback in those
-    // cases, so the `libghostty_sb < scrollback_in_buffer` shrink check in
-    // redraw() is the fallback that catches them.
-    if (std.mem.indexOf(u8, raw, "\x1B[3J") != null) {
-        term.rebuild_pending = true;
-    }
 
     // Scan for OSC sequences that libghostty-vt discards (7, 51, 52, 133).
     // One pass, dispatched by code in document order.
@@ -539,9 +520,12 @@ fn sendDynamicColorReply(
         "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}{s}",
         .{
             osc_num,
-            color.r, color.r,
-            color.g, color.g,
-            color.b, color.b,
+            color.r,
+            color.r,
+            color.g,
+            color.g,
+            color.b,
+            color.b,
             term_bytes,
         },
     ) catch return;
@@ -561,9 +545,12 @@ fn sendPaletteColorReply(
         "\x1b]4;{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}{s}",
         .{
             index,
-            color.r, color.r,
-            color.g, color.g,
-            color.b, color.b,
+            color.r,
+            color.r,
+            color.g,
+            color.g,
+            color.b,
+            color.b,
             term_bytes,
         },
     ) catch return;
@@ -682,14 +669,6 @@ fn fnRedraw(raw_env: ?*c.emacs_env, nargs: isize, args: [*c]c.emacs_value, _: ?*
         defer vt_log_env = null;
     }
     render.redraw(env, term, force_full);
-    return env.nil();
-}
-
-/// (ghostel--scroll-bottom TERM)
-fn fnScrollBottom(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
-    const env = emacs.Env.init(raw_env.?);
-    const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
-    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
     return env.nil();
 }
 
@@ -921,16 +900,25 @@ fn fnDebugState(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
     const env = emacs.Env.init(raw_env.?);
     const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
 
+    // Preserve viewport position
+    if (term.getScrollbar()) |sb| {
+        defer {
+            term.scrollViewport(gt.SCROLL_TOP, 0);
+            term.scrollViewport(gt.SCROLL_DELTA, @intCast(sb.offset));
+        }
+    }
+    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
+
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
 
     // Try update
     const update_result = gt.c.ghostty_render_state_update(term.render_state, term.terminal);
-    pos += (std.fmt.bufPrint(buf[pos..], "update={d} ", .{update_result}) catch return env.nil()).len;
+    pos += (std.fmt.bufPrint(buf[pos..], "update={d}\n", .{update_result}) catch return env.nil()).len;
 
     // Read first row via iterator
     if (gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_ROW_ITERATOR, @ptrCast(&term.row_iterator)) != gt.SUCCESS) {
-        pos += (std.fmt.bufPrint(buf[pos..], "iter=FAIL", .{}) catch return env.nil()).len;
+        pos += (std.fmt.bufPrint(buf[pos..], "iter=FAIL\n", .{}) catch return env.nil()).len;
         return env.makeString(buf[0..pos]);
     }
 
@@ -939,7 +927,7 @@ fn fnDebugState(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
         if (row_idx >= 10) break;
 
         if (gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_CELLS, @ptrCast(&term.row_cells)) != gt.SUCCESS) {
-            pos += (std.fmt.bufPrint(buf[pos..], "row{d}=FAIL ", .{row_idx}) catch break).len;
+            pos += (std.fmt.bufPrint(buf[pos..], "row{d}=FAIL\n ", .{row_idx}) catch break).len;
             continue;
         }
 
@@ -966,7 +954,7 @@ fn fnDebugState(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
             const enc_len = std.unicode.utf8Encode(cp, remaining) catch continue;
             pos += enc_len;
         }
-        pos += (std.fmt.bufPrint(buf[pos..], "\" ", .{}) catch break).len;
+        pos += (std.fmt.bufPrint(buf[pos..], "\"\n", .{}) catch break).len;
     }
 
     return env.makeString(buf[0..pos]);
@@ -977,6 +965,15 @@ fn fnDebugState(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*
 fn fnDebugFeed(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
     const env = emacs.Env.init(raw_env.?);
     const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
+
+    // Preserve viewport position
+    if (term.getScrollbar()) |sb| {
+        defer {
+            term.scrollViewport(gt.SCROLL_TOP, 0);
+            term.scrollViewport(gt.SCROLL_DELTA, @intCast(sb.offset));
+        }
+    }
+    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
 
     var stack_buf: [4096]u8 = undefined;
     const data = env.extractString(args[1], &stack_buf) orelse return env.nil();
@@ -1000,7 +997,7 @@ fn fnDebugFeed(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*a
 
     var buf: [2048]u8 = undefined;
     var pos: usize = 0;
-    pos += (std.fmt.bufPrint(buf[pos..], "cur=({d},{d}) row0=\"", .{ cx, cy }) catch return env.nil()).len;
+    pos += (std.fmt.bufPrint(buf[pos..], "cur=({d},{d})\n row0=\"", .{ cx, cy }) catch return env.nil()).len;
 
     if (gt.c.ghostty_render_state_row_iterator_next(term.row_iterator)) {
         if (gt.c.ghostty_render_state_row_get(term.row_iterator, gt.RS_ROW_DATA_CELLS, @ptrCast(&term.row_cells)) == gt.SUCCESS) {
@@ -1010,7 +1007,10 @@ fn fnDebugFeed(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*a
                 var gl: u32 = 0;
                 if (gt.c.ghostty_render_state_row_cells_get(term.row_cells, gt.RS_CELLS_DATA_GRAPHEMES_LEN, @ptrCast(&gl)) != gt.SUCCESS) continue;
                 if (gl == 0) {
-                    if (pos < buf.len) { buf[pos] = ' '; pos += 1; }
+                    if (pos < buf.len) {
+                        buf[pos] = ' ';
+                        pos += 1;
+                    }
                     continue;
                 }
                 var cp: [4]u32 = undefined;
@@ -1035,6 +1035,15 @@ fn fnCursorPosition(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _
     const env = emacs.Env.init(raw_env.?);
     const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
 
+    // Preserve viewport position
+    if (term.getScrollbar()) |sb| {
+        defer {
+            term.scrollViewport(gt.SCROLL_TOP, 0);
+            term.scrollViewport(gt.SCROLL_DELTA, @intCast(sb.offset));
+        }
+    }
+    term.scrollViewport(gt.SCROLL_BOTTOM, 0);
+
     // Ensure render state is up to date
     _ = gt.c.ghostty_render_state_update(term.render_state, term.terminal);
 
@@ -1048,49 +1057,6 @@ fn fnCursorPosition(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _
     _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_Y, @ptrCast(&cy));
 
     return env.call2(emacs.sym.cons, env.makeInteger(@as(i64, cx)), env.makeInteger(@as(i64, cy)));
-}
-
-/// (ghostel--cursor-pending-wrap-p TERM)
-/// Return t if the terminal's active cursor is in pending-wrap state
-/// (i.e. the last printed character filled the rightmost column and the
-/// next print will soft-wrap), nil otherwise.
-fn fnCursorPendingWrap(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
-    const env = emacs.Env.init(raw_env.?);
-    const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
-
-    var pending: bool = false;
-    if (gt.c.ghostty_terminal_get(term.terminal, gt.DATA_CURSOR_PENDING_WRAP, @ptrCast(&pending)) != gt.SUCCESS) {
-        return env.nil();
-    }
-    return if (pending) env.t() else env.nil();
-}
-
-/// (ghostel--cursor-on-empty-row-p TERM)
-/// Return t if the row containing the active cursor has no written
-/// cells and no cells with non-default style — i.e. the row renders to
-/// an empty Emacs buffer line.  Used alongside pending-wrap by
-/// `ghostel--anchor-window' to detect TUI CUP parks onto a trailing
-/// empty row, which also land `point' at `point-max' on the last
-/// visible row and would otherwise provoke a redisplay-induced scroll.
-fn fnCursorOnEmptyRow(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
-    const env = emacs.Env.init(raw_env.?);
-    const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
-
-    if (gt.c.ghostty_render_state_update(term.render_state, term.terminal) != gt.SUCCESS) return env.nil();
-
-    // Use viewport-relative cursor Y so the row index matches the
-    // viewport iterator `isRowEmptyAt' walks. Falls back to nil when
-    // the cursor isn't visible in the current viewport (e.g. scrolled
-    // into scrollback), which is also the safe answer for the clamp.
-    var has_value: bool = false;
-    _ = gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_HAS_VALUE, @ptrCast(&has_value));
-    if (!has_value) return env.nil();
-
-    var cy: u16 = 0;
-    if (gt.c.ghostty_render_state_get(term.render_state, gt.RS_DATA_CURSOR_VIEWPORT_Y, @ptrCast(&cy)) != gt.SUCCESS) {
-        return env.nil();
-    }
-    return if (render.isRowEmptyAt(term, cy)) env.t() else env.nil();
 }
 
 /// (ghostel--copy-all-text TERM)
@@ -1258,4 +1224,42 @@ fn fnDisableVtLog(raw_env: ?*c.emacs_env, _: isize, _: [*c]c.emacs_value, _: ?*a
         vt_log_active = false;
     }
     return env.t();
+}
+
+// TODO refactor
+fn fnUriAt(raw_env: ?*c.emacs_env, _: isize, args: [*c]c.emacs_value, _: ?*anyopaque) callconv(.c) c.emacs_value {
+    const env = emacs.Env.init(raw_env.?);
+    const term = env.getUserPtr(Terminal, args[0]) orelse return env.nil();
+    const row_from_bottom = env.extractInteger(args[1]);
+    const col = env.extractInteger(args[2]);
+    if (row_from_bottom <= 0) return env.nil();
+    const row = term.getTotalRows() - @as(usize, @intCast(row_from_bottom));
+
+    const point = gt.Point{ .tag = gt.c.GHOSTTY_POINT_TAG_SCREEN, .value = gt.PointValue{ .coordinate = gt.PointCoordinate{
+        .x = @intCast(col),
+        .y = @intCast(row),
+    } } };
+    var grid_ref = gt.GridRef{ .size = @sizeOf(gt.GridRef) };
+    if (gt.c.ghostty_terminal_grid_ref(term.terminal, point, &grid_ref) != gt.SUCCESS) {
+        return env.nil();
+    }
+
+    // Query hyperlink URI (stack buffer; heap fallback for long URIs)
+    var uri_stack: [2048]u8 = undefined;
+    var out_len: usize = 0;
+    var result = gt.c.ghostty_grid_ref_hyperlink_uri(&grid_ref, &uri_stack, uri_stack.len, &out_len);
+
+    var heap_uri: ?[]u8 = null;
+    if (result == gt.OUT_OF_SPACE and out_len > uri_stack.len) {
+        if (std.heap.c_allocator.alloc(u8, out_len)) |buf| {
+            defer std.heap.c_allocator.free(buf);
+            heap_uri = buf;
+            result = gt.c.ghostty_grid_ref_hyperlink_uri(&grid_ref, buf.ptr, buf.len, &out_len);
+        } else |_| {
+            return env.nil();
+        }
+    }
+
+    const uri = if (heap_uri) |uri| uri else &uri_stack;
+    return env.makeString(uri[0..out_len]);
 }

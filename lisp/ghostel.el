@@ -567,8 +567,6 @@ Bump this only when the Elisp code requires a newer native module
 ;; Declare native module functions for the byte compiler
 
 (declare-function ghostel--cursor-position "ghostel-module")
-(declare-function ghostel--cursor-pending-wrap-p "ghostel-module")
-(declare-function ghostel--cursor-on-empty-row-p "ghostel-module")
 (declare-function ghostel--encode-key "ghostel-module")
 (declare-function ghostel--focus-event "ghostel-module")
 (declare-function ghostel--mode-enabled "ghostel-module")
@@ -578,11 +576,11 @@ Bump this only when the Elisp code requires a newer native module
 (declare-function ghostel--mouse-event "ghostel-module")
 (declare-function ghostel--new "ghostel-module")
 (declare-function ghostel--redraw "ghostel-module" (term &optional full))
-(declare-function ghostel--scroll-bottom "ghostel-module")
 (declare-function ghostel--set-default-colors "ghostel-module")
 (declare-function ghostel--set-palette "ghostel-module")
 (declare-function ghostel--set-size "ghostel-module")
 (declare-function ghostel--write-input "ghostel-module")
+(declare-function ghostel--native-uri-at "ghostel-module")
 
 
 ;;; Automatic download and compilation of native module
@@ -1325,7 +1323,6 @@ when `ghostel-scroll-on-input' is nil.  Call from any path where
 the user's action implies \"show me the prompt\" — typed input,
 paste, yank, drop."
   (when (and ghostel-scroll-on-input ghostel--term)
-    (ghostel--scroll-bottom ghostel--term)
     (setq ghostel--snap-requested t)
     (setq ghostel--force-next-redraw t)))
 
@@ -1570,7 +1567,6 @@ pasted using bracketed paste."
     (ghostel--flush-pending-output)
     ;; CSI H = home, CSI 2 J = erase screen, CSI 3 J = erase scrollback.
     (ghostel--write-input ghostel--term "\e[H\e[2J\e[3J")
-    (ghostel--scroll-bottom ghostel--term)
     (setq ghostel--force-next-redraw t)
     ;; Scrollback is gone; any recorded scroll position no longer
     ;; refers to real content.  Reset so the next redraw anchors
@@ -1851,6 +1847,29 @@ stripped so the copied text matches the original terminal content."
     map)
   "Keymap for clickable hyperlinks in ghostel buffers.")
 
+(defun ghostel--native-link-help-echo (window _ pos)
+  "help-echo handler for OSC8 hyperlinks. Retrieves native URI from libghostty."
+  (with-current-buffer (window-buffer window)
+    (ghostel--native-uri-at-pos pos)))
+
+(defun ghostel--native-uri-at-pos (pos)
+  "Returns the native OSC8 hyperlink URI at POS."
+  (save-excursion
+	(goto-char pos)
+	(let* ((line (line-number-at-pos nil t))
+		   (total (line-number-at-pos (point-max) t))
+		   (row-from-bottom (- total line))
+		   (col (current-column)))
+	  (ghostel--native-uri-at ghostel--term row-from-bottom col))))
+
+(defun ghostel--uri-at-pos (pos)
+  "Returns the URI at POS by returning the help-echo property if it's a string,
+otherwise fetches the native OSC8 URI at that position."
+  (let ((help-echo (get-text-property pos 'help-echo)))
+	(if (stringp help-echo)
+		help-echo
+	  (ghostel--native-uri-at-pos pos))))
+
 (defun ghostel--open-link (url)
   "Open URL, dispatching by scheme.
 file:// URIs open in Emacs; http(s) and other schemes use `browse-url'.
@@ -1879,13 +1898,12 @@ a line suffix opens at the start of the file or directory."
 (defun ghostel-open-link-at-click (event)
   "Open the hyperlink at the mouse click EVENT position."
   (interactive "e")
-  (ghostel--open-link
-   (get-text-property (posn-point (event-start event)) 'help-echo)))
+  (ghostel--open-link (ghostel--uri-at-pos (posn-point (event-start event)))))
 
 (defun ghostel-open-link-at-point ()
   "Open the hyperlink at point."
   (interactive)
-  (ghostel--open-link (get-text-property (point) 'help-echo)))
+  (ghostel--open-link (ghostel--uri-at-pos (point))))
 
 (defun ghostel--find-next-link (from)
   "Return start position of the first hyperlink after FROM, or nil.
@@ -3156,14 +3174,7 @@ position COL columns into the first matched line."
     (when (> tr 0)
       (save-excursion
         (goto-char (point-max))
-        ;; Partial redraws can leave a trailing \n after the last row.
-        ;; Step past it so `forward-line' counts only content rows, not
-        ;; the phantom empty line that would otherwise push the viewport
-        ;; one line too deep and clip the bottom row.
-        (when (and (not (bobp))
-                   (eq (char-before) ?\n))
-          (forward-char -1))
-        (forward-line (- (1- tr)))
+        (forward-line (- tr))
         (line-beginning-position)))))
 
 (defun ghostel--active-preedit-overlay ()

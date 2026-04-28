@@ -36,12 +36,6 @@ rows: u16,
 /// libghostty's scrollback cap.
 scrollback_in_buffer: usize = 0,
 
-/// Set by `vtWrite`, cleared at the end of `redraw`. Used to detect that
-/// libghostty has been written to since the last redraw — required by
-/// the cap-bound stale-scrollback rebuild trigger to distinguish "no
-/// activity" from "writes happened but total_rows plateaued".
-wrote_since_redraw: bool = false,
-
 /// When true, the next redraw erases the Emacs buffer,
 /// resets scrollback state, and forces a full rebuild.  The erase is deferred
 /// so `inhibit-redisplay` can prevent a visible blank frame.
@@ -58,15 +52,6 @@ rebuild_pending: bool = false,
 /// Reset by `resize` since a reflow means the stream is effectively
 /// new.
 last_input_was_cr: bool = false,
-
-/// Snapshot of the first scrollback row's codepoints (one per cell, up
-/// to `cols` entries), sampled at the end of each redraw that touched
-/// scrollback. Used to detect rotation (libghostty evicting the oldest
-/// row in lockstep with new ones being pushed) when `total_rows` is
-/// plateaued at the cap. Only meaningful when `first_scrollback_row_valid`
-/// is true.
-first_scrollback_row: [512]u32 = [_]u32{0} ** 512,
-first_scrollback_row_valid: bool = false,
 
 /// Cached Emacs env pointer — only valid during a callback from Emacs.
 env: ?emacs.Env = null,
@@ -219,7 +204,6 @@ pub fn getColorBackground(self: *Self, out: *gt.ColorRgb) bool {
 /// Feed VT data from the PTY into the terminal.
 pub fn vtWrite(self: *Self, data: []const u8) void {
     gt.c.ghostty_terminal_vt_write(self.terminal, data.ptr, data.len);
-    self.wrote_since_redraw = true;
 }
 
 /// Resize the terminal.
