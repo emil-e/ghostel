@@ -32,7 +32,22 @@ pub const Env = struct {
     // --- Function calls ---
 
     pub fn funcall(self: Env, func: Value, args: []const Value) Value {
-        return self.raw.funcall.?(self.raw, func, @intCast(args.len), @constCast(args.ptr));
+        const result = self.raw.funcall.?(self.raw, func, @intCast(args.len), @constCast(args.ptr));
+
+        if (comptime builtin.mode == .Debug) {
+            if (self.nonLocalExitCheck() != c.emacs_funcall_exit_return) {
+                self.nonLocalExitClear();
+                var addresses: [32]usize = undefined;
+                var trace = std.builtin.StackTrace{
+                    .instruction_addresses = &addresses,
+                    .index = 0,
+                };
+                std.debug.captureStackTrace(null, &trace);
+                self.logStackTrace(&trace);
+            }
+        }
+
+        return result;
     }
 
     pub fn f(self: Env, comptime func: []const u8, args: anytype) Value {
@@ -98,8 +113,8 @@ pub const Env = struct {
         @compileError(std.fmt.comptimePrint("Non-supported type: {}", .{T}));
     }
 
-    pub fn cons(self: Env, car: anytype, cdr: anytype) Value {
-        return self.f("cons", .{ car, cdr });
+    pub fn cons(self: Env, car_arg: anytype, cdr_arg: anytype) Value {
+        return self.f("cons", .{ car_arg, cdr_arg });
     }
 
     pub fn getUserPtr(self: Env, comptime T: type, val: Value) ?*T {
@@ -153,6 +168,14 @@ pub const Env = struct {
         }
         allocator.free(buf);
         return null;
+    }
+
+    pub fn car(self: Env, val: Value) Value {
+        return self.f("car", .{val});
+    }
+
+    pub fn cdr(self: Env, val: Value) Value {
+        return self.f("cdr", .{val});
     }
 
     // --- Type checking ---
@@ -391,6 +414,8 @@ const interned_symbols = [_][:0]const u8{
     ":underline",
     ":weight",
     "bold",
+    "car",
+    "cdr",
     "char-before",
     "cons",
     "dash",
@@ -413,6 +438,7 @@ const interned_symbols = [_][:0]const u8{
     "format",
     "forward-line",
     "fset",
+    "get-text-property",
     "ghostel",
     "ghostel--cursor-char-pos",
     "ghostel--cursor-pos",
@@ -434,6 +460,7 @@ const interned_symbols = [_][:0]const u8{
     "ghostel--set-title",
     "ghostel--update-directory",
     "ghostel-input",
+    "ghostel-line-ref",
     "ghostel-link-map",
     "ghostel-prompt",
     "ghostel-wrap",
