@@ -125,6 +125,7 @@ pub fn redraw(self: *Self, env: emacs.Env, term: *Terminal, force_full: bool) !v
     }
 
     const scrollbar = try term.getScrollbar();
+    const had_scrollback = self.rows_in_buffer > scrollbar.len;
 
     // If the font changed, the font metrics are no longer valid, so we rebuild.
     const font_changed = self.updateFontInfo(env);
@@ -135,7 +136,6 @@ pub fn redraw(self: *Self, env: emacs.Env, term: *Terminal, force_full: bool) !v
     // If we had some scrollback but the scrollbar was reset from the parked
     // MAX - 1 position, that indicates that libghostty cleared its scrollback
     // and we follow after by clearing too.
-    const had_scrollback = self.rows_in_buffer > scrollbar.len;
     const scrollback_cleared = had_scrollback and scrollbar.len + scrollbar.offset == scrollbar.total;
     if (scrollback_cleared) {
         self.line_ref_offset = .{ .line = 0, .sub_line = 0 };
@@ -179,19 +179,25 @@ pub fn redraw(self: *Self, env: emacs.Env, term: *Terminal, force_full: bool) !v
         self.rows_in_buffer += rendered_rows - self.size.rows;
     }
 
+    try self.evictScrollback(env, term);
+
     // If we have a pending resize, commit it now and just rerender the active
     // since the scrollback is already up to date.
     if (self.pending_resize != null) {
         self.commitResize(term);
-        term.scrollViewport(gt.SCROLL_BOTTOM, 0);
-        self.gotoActiveStart(env);
+        if (try term.getTotalRows() < self.rows_in_buffer) {
+            term.scrollViewport(gt.SCROLL_TOP, 0);
+            env.gotoChar(env.pointMin());
+        } else {
+            term.scrollViewport(gt.SCROLL_BOTTOM, 0);
+            self.gotoActiveStart(env);
+        }
         var line_ref: ?LineRef = null;
         try self.render(env, term, &line_ref, 0);
         // There is now at least self.size.rows number of rows
         self.rows_in_buffer = @max(self.rows_in_buffer, self.size.rows);
     }
 
-    try self.evictScrollback(env, term);
     try self.renderCursor(env);
 
     // Update working directory from OSC 7
