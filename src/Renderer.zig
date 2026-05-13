@@ -38,11 +38,15 @@ row: RowContent = .{},
 
 font_info: ?FontInfo = null,
 
+line_ref_offset: LineRef = .{ .line = 0, .sub_line = 0 },
+
 const FontInfo = struct {
     width: i64,
     height: i64,
     coverage: u32,
 };
+
+const LineRef = struct { line: i64, sub_line: i64 };
 
 pub fn init(cols: u16, rows: u16) !Self {
     var render_state: gt.RenderState = undefined;
@@ -132,14 +136,17 @@ pub fn redraw(self: *Self, env: emacs.Env, term: *Terminal, force_full: bool) !v
     // MAX - 1 position, that indicates that libghostty cleared its scrollback
     // and we follow after by clearing too.
     const had_scrollback = self.rows_in_buffer > scrollbar.len;
-    const scrollbar_reset = had_scrollback and scrollbar.len + scrollbar.offset == scrollbar.total;
+    const scrollback_cleared = had_scrollback and scrollbar.len + scrollbar.offset == scrollbar.total;
+    if (scrollback_cleared) {
+        self.line_ref_offset = .{ .line = 0, .sub_line = 0 };
+    }
 
     // If we had some scrollback but the scrollbar ended up at offset == 0, that
     // means that we got so much scrolling that we scrolled all the way up to the
     // cap and do not know how much we missed.
     const scrollbar_hit_cap = had_scrollback and scrollbar.offset == 0;
 
-    if (force_full or font_changed or cols_changed or scrollbar_reset or scrollbar_hit_cap) {
+    if (force_full or font_changed or cols_changed or scrollback_cleared or scrollbar_hit_cap) {
         env.eraseBuffer();
         // Commit any pending resize since we're doing a rebuild anyway.
         self.commitResize(term);
@@ -178,20 +185,13 @@ pub fn redraw(self: *Self, env: emacs.Env, term: *Terminal, force_full: bool) !v
         self.commitResize(term);
         term.scrollViewport(gt.SCROLL_BOTTOM, 0);
         self.gotoActiveStart(env);
-        try self.render(env, term, 0);
+        var line_ref: ?LineRef = null;
+        try self.render(env, term, &line_ref, 0);
         // There is now at least self.size.rows number of rows
         self.rows_in_buffer = @max(self.rows_in_buffer, self.size.rows);
     }
 
-    // Evict old scrollback if libghostty also did
-    const libghostty_rows = try term.getTotalRows();
-    if (libghostty_rows < self.rows_in_buffer) {
-        env.gotoChar(env.pointMin());
-        _ = env.forwardLine(@as(i64, @intCast(self.rows_in_buffer - libghostty_rows)));
-        env.deleteRegion(env.pointMin(), env.point());
-        self.rows_in_buffer = libghostty_rows;
-    }
-
+    try self.evictScrollback(env, term);
     try self.renderCursor(env);
 
     // Update working directory from OSC 7
@@ -206,6 +206,20 @@ pub fn redraw(self: *Self, env: emacs.Env, term: *Terminal, force_full: bool) !v
     // the old active area, and advancing by 1 reaches the new one.
     term.scrollViewport(gt.SCROLL_BOTTOM, 0);
     term.scrollViewport(gt.SCROLL_DELTA, -1);
+}
+
+fn evictScrollback(self: *Self, env: emacs.Env, term: *Terminal) !void {
+    // Evict old scrollback if libghostty also did
+    const libghostty_rows = try term.getTotalRows();
+    if (libghostty_rows < self.rows_in_buffer) {
+        env.gotoChar(env.pointMin());
+        _ = env.forwardLine(@as(i64, @intCast(self.rows_in_buffer - libghostty_rows)));
+        env.deleteRegion(env.pointMin(), env.point());
+        self.rows_in_buffer = libghostty_rows;
+        if (getLineRef(env, env.extractInteger(env.point()))) |lf| {
+            self.line_ref_offset = lf;
+        }
+    }
 }
 
 fn updateFontInfo(self: *Self, env: emacs.Env) bool {
@@ -415,12 +429,6 @@ fn applyProps(env: emacs.Env, start: i64, end: i64, props: CellProps, default_co
     if (props.input) {
         env.putTextProperty(start_val, end_val, emacs.sym.@"ghostel-input", env.t());
     }
-}
-
-/// Check if the current row in the iterator is soft-wrapped.
-fn isRowWrapped(self: *Self) !bool {
-    const raw_row = try gt.rs_row.get(gt.c.GhosttyRow, self.row_iterator, gt.c.GHOSTTY_RENDER_STATE_ROW_DATA_RAW);
-    return try gt.row.get(bool, raw_row, gt.ROW_DATA_WRAP);
 }
 
 /// Properties for a run of cells.
@@ -714,6 +722,8 @@ fn adjustGlyphs(self: *Self, env: emacs.Env, row_start: i64) void {
 fn insertRow(
     self: *Self,
     env: emacs.Env,
+    raw_row: gt.c.GhosttyRow,
+    line_ref: LineRef,
     default_colors: *const BgFg,
 ) !void {
     try self.row.build(
@@ -722,8 +732,17 @@ fn insertRow(
         if (self.font_info) |f| f.coverage else std.math.maxInt(u32),
     );
 
-    const row_start = env.extractInteger(env.point());
+    const row_start_val = env.point();
+    const row_start = env.extractInteger(row_start_val);
     env.insert(self.row.text.items);
+    const row_end_val = env.point();
+
+    env.putTextProperty(
+        row_start_val,
+        row_end_val,
+        emacs.sym.@"ghostel-line-ref",
+        env.cons(line_ref.line, line_ref.sub_line),
+    );
 
     for (self.row.runs.items) |*run| {
         if (run.end_char <= run.start_char) continue;
@@ -737,11 +756,14 @@ fn insertRow(
 
     self.adjustGlyphs(env, row_start);
 
-    if (try self.isRowWrapped()) {
+    if (try gt.row.get(bool, raw_row, gt.ROW_DATA_WRAP)) {
         // Mark newlines from soft-wrapped rows so copy mode can filter them
-        const point = env.point();
-        const nl_pos = env.makeInteger(env.extractInteger(point) - 1);
-        env.putTextProperty(nl_pos, point, emacs.sym.@"ghostel-wrap", env.t());
+        env.putTextProperty(
+            env.makeInteger(env.extractInteger(row_end_val) - 1),
+            row_end_val,
+            emacs.sym.@"ghostel-wrap",
+            env.t(),
+        );
     }
 }
 
@@ -813,7 +835,37 @@ fn getDefaultColors(self: *Self) !BgFg {
     return BgFg{ .fg = fg, .bg = bg };
 }
 
-pub fn render(self: *Self, env: emacs.Env, term: *Terminal, skip: usize) !void {
+fn resolveLineRef(self: *Self, env: emacs.Env, raw_row: gt.c.GhosttyRow, line_ref: *?LineRef) !void {
+    if (line_ref.* != null) return;
+
+    const pos = env.extractInteger(env.point());
+    if (pos <= 1) {
+        line_ref.* = self.line_ref_offset;
+        return;
+    }
+
+    if (getLineRef(env, pos - 1)) |prev_ref| {
+        if (try gt.row.get(bool, raw_row, gt.c.GHOSTTY_ROW_DATA_WRAP_CONTINUATION)) {
+            line_ref.* = .{ .line = prev_ref.line, .sub_line = prev_ref.sub_line + 1 };
+        } else {
+            line_ref.* = .{ .line = prev_ref.line + 1, .sub_line = 0 };
+        }
+    } else {
+        env.logError("Missing line ref at pos %d", .{pos - 1});
+    }
+}
+
+fn getLineRef(env: emacs.Env, pos: i64) ?LineRef {
+    const prev_ref = env.f("get-text-property", .{ pos, emacs.sym.@"ghostel-line-ref" });
+    if (env.isNil(prev_ref)) return null;
+
+    return .{
+        .line = env.extractInteger(env.car(prev_ref)),
+        .sub_line = env.extractInteger(env.cdr(prev_ref)),
+    };
+}
+
+pub fn render(self: *Self, env: emacs.Env, term: *Terminal, line_ref: *?LineRef, skip: usize) !void {
     try gt.renderStateUpdate(self.render_state, term.terminal);
     const default_colors = try self.getDefaultColors();
 
@@ -847,13 +899,30 @@ pub fn render(self: *Self, env: emacs.Env, term: *Terminal, skip: usize) !void {
         }) {
             if (row_count < skip) continue;
 
+            const raw_row = try gt.rs_row.get(
+                gt.c.GhosttyRow,
+                self.row_iterator,
+                gt.c.GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+            );
+
+            try self.resolveLineRef(env, raw_row, line_ref);
+
             // Only process dirty rows
             const dirty_row = dirty_full or try gt.rs_row.get(bool, self.row_iterator, gt.RS_ROW_DATA_DIRTY);
             if (dirty_row) {
                 env.deleteRegion(env.point(), env.lineBeginningPosition2());
-                try self.insertRow(env, &default_colors);
+                try self.insertRow(env, raw_row, line_ref.*.?, &default_colors);
             } else {
                 _ = env.forwardLine(1);
+            }
+
+            if (line_ref.*) |*lr| {
+                if (try gt.row.get(bool, raw_row, gt.c.GHOSTTY_ROW_DATA_WRAP)) {
+                    lr.sub_line += 1;
+                } else {
+                    lr.line += 1;
+                    lr.sub_line = 0;
+                }
             }
         }
 
@@ -909,6 +978,7 @@ fn renderToEnd(self: *Self, env: emacs.Env, term: *Terminal) !usize {
     const scrollbar = try term.getScrollbar();
     if (scrollbar.len == 0) return 0;
     const offset_max = scrollbar.total - scrollbar.len;
+
     // Walk from the current viewport position to offset_max in viewport-sized
     // steps, rendering each chunk into the Emacs buffer. Consecutive positions
     // overlap by `scrollbar.len - step` rows when the remaining range is
@@ -920,8 +990,9 @@ fn renderToEnd(self: *Self, env: emacs.Env, term: *Terminal) !usize {
     var skip: usize = 0;
     var rendered_rows: usize = 0;
     var current_offset = scrollbar.offset;
+    var line_ref: ?LineRef = null;
     for (0..num_viewports) |_| {
-        try self.render(env, term, skip);
+        try self.render(env, term, &line_ref, skip);
         rendered_rows += (scrollbar.len - skip);
 
         const max_step = offset_max - current_offset;

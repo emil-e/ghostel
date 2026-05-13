@@ -83,6 +83,13 @@ succeeds."
          (format "Process %s exited before predicate succeeded" (process-name proc)))))
     result))
 
+(defun ghostel-test--line-ref (n)
+  "Return the ghostel-line-ref cons at buffer row N (0-indexed from point-min)."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line n)
+    (get-text-property (point) 'ghostel-line-ref)))
+
 ;; -----------------------------------------------------------------------
 ;; Test: terminal creation
 ;; -----------------------------------------------------------------------
@@ -946,6 +953,211 @@ single redraw):
               ;; after-00 scrolled into scrollback; after-01..after-04 in viewport.
               (should (string-match-p "after-00" content))
               (should (string-match-p "after-04" content)))))
+      (kill-buffer buf))))
+
+;; -----------------------------------------------------------------------
+;; Tests: line refs (ghostel-line-ref)
+;; -----------------------------------------------------------------------
+
+(ert-deftest ghostel-test-line-ref-non-wrapping-append ()
+  "Fill screen with non-wrapping lines; refs go (0.0)..(4.0).
+Injecting 3 more lines must leave existing refs unchanged and continue
+from (5.0).."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 100))
+                 (inhibit-read-only t))
+            (dotimes (i 5)
+              (ghostel--write-input term (format "line-%d\r\n" i)))
+            (ghostel--redraw term t)
+            (dotimes (i 5)
+              (should (equal (cons i 0) (ghostel-test--line-ref i))))
+            (dotimes (i 3)
+              (ghostel--write-input term (format "more-%d\r\n" i)))
+            (ghostel--redraw term)
+            ;; Old refs (rows 0-4) unchanged
+            (dotimes (i 5)
+              (should (equal (cons i 0) (ghostel-test--line-ref i))))
+            ;; New rows continue from 5
+            (should (equal '(5 . 0) (ghostel-test--line-ref 5)))
+            (should (equal '(6 . 0) (ghostel-test--line-ref 6)))
+            (should (equal '(7 . 0) (ghostel-test--line-ref 7)))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-line-ref-wrapping ()
+  "Verify sub-line refs for wrapped lines: non-wrapping gets (0.0), once-wrapped (1.0)+(1.1), twice-wrapped (2.0)+(2.1)+(2.2)."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref-wrap*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 10 10 100))
+                 (inhibit-read-only t))
+            ;; 5 chars — fits in 10 cols, no wrap
+            (ghostel--write-input term "short\r\n")
+            ;; 11 chars — wraps once (10+1)
+            (ghostel--write-input term "helloworld1\r\n")
+            ;; 21 chars — wraps twice (10+10+1)
+            (ghostel--write-input term "1234567890abcdefghijk\r\n")
+            (ghostel--redraw term t)
+            ;; Row 0: single-line logical line 0
+            (should (equal '(0 . 0) (ghostel-test--line-ref 0)))
+            ;; Rows 1-2: logical line 1 wraps to two screen rows
+            (should (equal '(1 . 0) (ghostel-test--line-ref 1)))
+            (should (equal '(1 . 1) (ghostel-test--line-ref 2)))
+            ;; Rows 3-5: logical line 2 wraps to three screen rows
+            (should (equal '(2 . 0) (ghostel-test--line-ref 3)))
+            (should (equal '(2 . 1) (ghostel-test--line-ref 4)))
+            (should (equal '(2 . 2) (ghostel-test--line-ref 5)))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-line-ref-resize-wraps-first ()
+  "Before resize: (0.0),(1.0).  After resize to 6 cols: (0.0),(0.1),(1.0)."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref-resize*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 100))
+                 (inhibit-read-only t))
+            ;; "helloworld" (10 chars) fits in 80 cols; "hi" (2 chars) always fits
+            (ghostel--write-input term "helloworld\r\n")
+            (ghostel--write-input term "hi\r\n")
+            (ghostel--redraw term t)
+            (should (equal '(0 . 0) (ghostel-test--line-ref 0)))
+            (should (equal '(1 . 0) (ghostel-test--line-ref 1)))
+            ;; Resize to 6 cols: "hellow"+"orld" wraps, "hi" does not
+            (ghostel--set-size term 5 6)
+            (ghostel--redraw term)
+            (should (equal '(0 . 0) (ghostel-test--line-ref 0)))
+            (should (equal '(0 . 1) (ghostel-test--line-ref 1)))
+            (should (equal '(1 . 0) (ghostel-test--line-ref 2)))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-line-ref-stable-on-modify ()
+  "Overwriting one line in-place must not affect line refs of the other rows."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref-modify*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 100))
+                 (inhibit-read-only t))
+            (dotimes (i 5)
+              (ghostel--write-input term (format "line-%d\r\n" i)))
+            (ghostel--redraw term t)
+            (let ((refs-before (mapcar #'ghostel-test--line-ref (number-sequence 0 4))))
+              ;; Move cursor to row 3 (ESC[3;1H), overwrite content
+              (ghostel--write-input term "\e[3;1Hmodified\r")
+              (ghostel--redraw term)
+              (dotimes (i 5)
+                (should (equal (nth i refs-before) (ghostel-test--line-ref i)))))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-line-ref-after-eviction ()
+  "Each row's ghostel-line-ref matches its content after scrollback eviction.
+Lines are written as zero-padded numbers so the content is ground truth for
+what the ref should be.  Small batches (3 lines + render) exercise the
+gradual eviction path (evictScrollback) rather than the scrollbar-hit-cap
+full rebuild."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref-evict*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 10))
+                 (inhibit-read-only t)
+                 (written 0))
+            ;; 10 batches × 3 lines = 30 lines — well past the cap+viewport of 15.
+            (dotimes (_ 10)
+              (dotimes (_ 3)
+                (ghostel--write-input term (format "%05d\r\n" written))
+                (setq written (1+ written)))
+              (ghostel--redraw term))
+            ;; Each surviving row's content encodes its logical line number.
+            ;; The stored ref must match.
+            (goto-char (point-min))
+            (while (not (eobp))
+              (let* ((content (string-trim-right
+                               (buffer-substring-no-properties
+                                (line-beginning-position)
+                                (line-end-position))))
+                     (ref (get-text-property (point) 'ghostel-line-ref)))
+                (when (string-match-p "^[0-9]" content)
+                  (should (equal (cons (string-to-number content) 0) ref))))
+              (forward-line 1))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-line-ref-stable-after-force-redraw-post-eviction ()
+  "Force-full redraw after eviction must use the updated line_ref_offset.
+Refs must continue from where eviction left off rather than restarting at
+\(0 . 0\).  Same content-encodes-number strategy as the eviction test."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref-frd*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 10))
+                 (inhibit-read-only t)
+                 (written 0))
+            (dotimes (_ 10)
+              (dotimes (_ 3)
+                (ghostel--write-input term (format "%05d\r\n" written))
+                (setq written (1+ written)))
+              (ghostel--redraw term))
+            ;; Force a full rebuild — must inherit the updated line_ref_offset.
+            (ghostel--redraw term t)
+            (goto-char (point-min))
+            (while (not (eobp))
+              (let* ((content (string-trim-right
+                               (buffer-substring-no-properties
+                                (line-beginning-position)
+                                (line-end-position))))
+                     (ref (get-text-property (point) 'ghostel-line-ref)))
+                (when (string-match-p "^[0-9]" content)
+                  (should (equal (cons (string-to-number content) 0) ref))))
+              (forward-line 1))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-line-ref-stable-across-vertical-resize ()
+  "Vertical-only resizes must not alter any ghostel-line-ref values.
+Fills a 5-row terminal with 8 lines (3 scrollback + 5 viewport), records
+all refs, shrinks to 3 rows, verifies refs unchanged, then expands to 8
+rows (larger than the original), and verifies refs are still unchanged."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref-vresize*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 100))
+                 (inhibit-read-only t))
+            (dotimes (i 8)
+              (ghostel--write-input term (format "line-%d\r\n" i)))
+            (ghostel--redraw term t)
+            (let ((refs-before (mapcar #'ghostel-test--line-ref
+                                       (number-sequence 0 7))))
+              ;; Shrink rows only — no column change, so no full rebuild.
+              (ghostel--set-size term 3 80)
+              (ghostel--redraw term)
+              (dotimes (i 8)
+                (should (equal (nth i refs-before) (ghostel-test--line-ref i))))
+              ;; Expand beyond original row count.
+              (ghostel--set-size term 8 80)
+              (ghostel--redraw term)
+              (dotimes (i 8)
+                (should (equal (nth i refs-before) (ghostel-test--line-ref i)))))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-line-ref-after-csi3j ()
+  "CSI 3J clears scrollback and resets line refs to start at (0 . 0)."
+  (let ((buf (generate-new-buffer " *ghostel-test-line-ref-csi3j*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let* ((term (ghostel--new 5 80 100))
+                 (inhibit-read-only t))
+            ;; Fill scrollback with 10 lines, render
+            (dotimes (i 10)
+              (ghostel--write-input term (format "before-%02d\r\n" i)))
+            (ghostel--redraw term t)
+            ;; Refs are (0.0)..(9.0)
+            (should (equal '(0 . 0) (ghostel-test--line-ref 0)))
+            (should (equal '(9 . 0) (ghostel-test--line-ref 9)))
+            ;; CSI 3J: erase scrollback only, then write 5 fresh lines
+            (ghostel--write-input term "\e[3J")
+            (dotimes (i 5)
+              (ghostel--write-input term (format "after-%02d\r\n" i)))
+            (ghostel--redraw term)
+            ;; scrollback_cleared signal triggers erase+rebuild; refs restart at (0 . 0)
+            (should (equal '(0 . 0) (ghostel-test--line-ref 0)))))
       (kill-buffer buf))))
 
 ;; -----------------------------------------------------------------------
