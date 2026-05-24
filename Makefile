@@ -24,7 +24,7 @@ endif
 ZIG_SOURCES := $(wildcard src/*.zig src/*.c build.zig build.zig.zon symbols.map) \
                $(wildcard vendor/*.h)
 
-.PHONY: all build test test-native test-zig test-all test-evil lint melpazoid melpazoid-ghostel melpazoid-evil-ghostel byte-compile docquotes bench bench-quick bench-e2e bench-tui-partial clean regen-terminfo
+.PHONY: all build test test-native test-render test-render-native test-zig test-all test-evil lint melpazoid melpazoid-ghostel melpazoid-evil-ghostel byte-compile docquotes bench bench-quick bench-e2e bench-tui-partial clean regen-terminfo
 
 # Recommended invocation: `make -j$(nproc) all' on Linux,
 # `make -j$(sysctl -n hw.ncpu) all' on macOS.  GNU make 4+ also accepts
@@ -68,6 +68,10 @@ TEST_NATIVE_STAMPS := $(patsubst %,$(TEST_STAMPS_DIR)/native-%.ok,$(TEST_BASES))
 test: $(TEST_ELISP_STAMPS)
 
 test-native: $(TEST_NATIVE_STAMPS)
+
+test-render: $(TEST_STAMPS_DIR)/elisp-ghostel-render-test.ok
+
+test-render-native: $(TEST_STAMPS_DIR)/native-ghostel-render-test.ok
 
 # Pass `-O target' (output-sync, GNU make 4+) for clean interleaving:
 #   make -j$(nproc) -O target test
