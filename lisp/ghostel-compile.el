@@ -68,7 +68,6 @@
 (require 'ghostel)
 (require 'compile)
 
-(declare-function ghostel--new "ghostel-module")
 (declare-function ghostel--set-size "ghostel-module")
 (declare-function ghostel--write-input "ghostel-module")
 
@@ -648,9 +647,14 @@ resize hooks
       ;; password heuristic looks for - leaving detection on would pop
       ;; a `read-passwd' minibuffer at the start of every compile.
       (setq-local ghostel-detect-password-prompts nil)
-      (setq ghostel--term (ghostel--new height width ghostel-max-scrollback))
-      (setq ghostel--term-rows height)
-      (ghostel--apply-palette ghostel--term)
+      ;; A compile rerun reuses the same Emacs buffer after killing the
+      ;; old process and erasing its contents.  Clear the previous native
+      ;; handle before routing terminal creation through the shared
+      ;; initializer, keeping buffer/term setup in one place.
+      (setq ghostel--term nil)
+      (setq ghostel--term-rows nil)
+      (setq ghostel--term-cols nil)
+      (ghostel--init-buffer buffer nil height width)
       ;; `kill-compilation' locates our buffer via `compilation-find-buffer',
       ;; which requires `compilation-locs' to be buffer-local (see
       ;; `compilation-buffer-internal-p').  During the run we stay in

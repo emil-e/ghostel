@@ -37,7 +37,6 @@
 (declare-function ghostel--mode-enabled "ghostel-module")
 (declare-function ghostel--module-version "ghostel-module")
 (declare-function ghostel--encode-key "ghostel-module")
-(declare-function ghostel--new "ghostel-module")
 (declare-function ghostel--raw-key-sequence "ghostel")
 (declare-function ghostel--cursor-row-text "ghostel")
 (declare-function ghostel--remote-shell-p "ghostel")
@@ -654,11 +653,11 @@ omit it when the connection itself is the suspected fault."
         (if (not ghostel-buf)
             (insert "\n(not in a ghostel buffer — buffer/process/window/terminal sections skipped)\n")
           (let (buf-name maj-mode dir remote modes
-                proc cmd shell shell-integ tramp-integ detected
-                term term-rows term-cols force pending timer input-mode
-                input-bytes input-timer
-                buf-size buf-lines pt dec2026 alt-scr
-                dln-on dln-style spawn-capture)
+                         proc cmd shell shell-integ tramp-integ detected
+                         term term-rows term-cols force pending timer input-mode
+                         input-bytes input-timer
+                         buf-size buf-lines pt dec2026 alt-scr
+                         dln-on dln-style spawn-capture)
             (with-current-buffer ghostel-buf
               (setq buf-name (buffer-name)
                     maj-mode major-mode
@@ -900,46 +899,57 @@ omit it when the connection itself is the suspected fault."
          ((not (fboundp 'ghostel--encode-key))
           (insert "(native module not loaded — cannot probe encoder)\n"))
          (t
-          (let ((probe (ignore-errors (ghostel--new 25 80 100)))
+          (let ((probe-buffer nil)
+                (probe nil)
                 (sent nil))
-            (cond
-             ((null probe)
-              (insert "(could not create probe terminal)\n"))
-             (t
-              (cl-letf (((symbol-function 'ghostel--flush-output)
-                         (lambda (s) (setq sent s))))
-                (dolist (chord '(("backspace" ""          "Backspace")
-                                 ("backspace" "ctrl"      "C-Backspace")
-                                 ("backspace" "meta"      "M-Backspace")
-                                 ("f"         "meta"      "M-f")
-                                 ("b"         "meta"      "M-b")
-                                 ("."         "meta"      "M-.")
-                                 ("f"         "ctrl,meta" "C-M-f")
-                                 ("v"         "ctrl,meta" "C-M-v")
-                                 ("h"         "ctrl"      "C-h")))
-                  (setq sent nil)
-                  ;; Mirror `ghostel--send-encoded': try encoder, fall back
-                  ;; to the raw-key-sequence path on nil.  Encoder skips
-                  ;; plain Meta+letter when no utf8 is supplied (live
-                  ;; keystrokes don't supply it either) — the fallback
-                  ;; produces ESC + char.
-                  (unless (ghostel--encode-key probe (nth 0 chord)
-                                               (nth 1 chord) nil)
-                    (setq sent (ghostel--raw-key-sequence (nth 0 chord)
-                                                          (nth 1 chord))))
-                  (insert (format "  %-13s → %s\n"
-                                  (nth 2 chord)
-                                  (cond ((null sent) "(no output)")
-                                        ((string-empty-p sent) "(empty)")
-                                        (t (mapconcat
-                                            (lambda (b) (format "0x%02x" b))
-                                            (string-to-list sent) " ")))))))
-              (insert "\nReadline `.inputrc' rules expecting these byte streams:\n")
-              (insert "  \"\\C-?\"     → 0x7f          (Backspace)\n")
-              (insert "  \"\\C-\\b\"    → 0x08          (C-Backspace, also C-h in legacy)\n")
-              (insert "  \"\\eb\"      → 0x1b 0x62     (M-b)\n")
-              (insert "  \"\\e\\C-f\"   → 0x1b 0x06     (C-M-f)\n")
-              (insert "  \"\\e\\C-v\"   → 0x1b 0x16     (C-M-v)\n"))))))
+            (unwind-protect
+                (progn
+                  (setq probe-buffer
+                        (let ((ghostel-max-scrollback 100))
+                          (ignore-errors
+                            (ghostel--create " *ghostel-debug-probe*" nil nil 25 80))))
+                  (setq probe (and probe-buffer
+                                   (buffer-local-value 'ghostel--term probe-buffer)))
+                  (cond
+                   ((null probe)
+                    (insert "(could not create probe terminal)\n"))
+                   (t
+                    (cl-letf (((symbol-function 'ghostel--flush-output)
+                               (lambda (s) (setq sent s))))
+                      (dolist (chord '(("backspace" ""          "Backspace")
+                                       ("backspace" "ctrl"      "C-Backspace")
+                                       ("backspace" "meta"      "M-Backspace")
+                                       ("f"         "meta"      "M-f")
+                                       ("b"         "meta"      "M-b")
+                                       ("."         "meta"      "M-.")
+                                       ("f"         "ctrl,meta" "C-M-f")
+                                       ("v"         "ctrl,meta" "C-M-v")
+                                       ("h"         "ctrl"      "C-h")))
+                        (setq sent nil)
+                        ;; Mirror `ghostel--send-encoded': try encoder, fall back
+                        ;; to the raw-key-sequence path on nil.  Encoder skips
+                        ;; plain Meta+letter when no utf8 is supplied (live
+                        ;; keystrokes don't supply it either) — the fallback
+                        ;; produces ESC + char.
+                        (unless (ghostel--encode-key probe (nth 0 chord)
+                                                     (nth 1 chord) nil)
+                          (setq sent (ghostel--raw-key-sequence (nth 0 chord)
+                                                                (nth 1 chord))))
+                        (insert (format "  %-13s → %s\n"
+                                        (nth 2 chord)
+                                        (cond ((null sent) "(no output)")
+                                              ((string-empty-p sent) "(empty)")
+                                              (t (mapconcat
+                                                  (lambda (b) (format "0x%02x" b))
+                                                  (string-to-list sent) " ")))))))
+                    (insert "\nReadline `.inputrc' rules expecting these byte streams:\n")
+                    (insert "  \"\\C-?\"     → 0x7f          (Backspace)\n")
+                    (insert "  \"\\C-\\b\"    → 0x08          (C-Backspace, also C-h in legacy)\n")
+                    (insert "  \"\\eb\"      → 0x1b 0x62     (M-b)\n")
+                    (insert "  \"\\e\\C-f\"   → 0x1b 0x06     (C-M-f)\n")
+                    (insert "  \"\\e\\C-v\"   → 0x1b 0x16     (C-M-v)\n"))))
+              (when (buffer-live-p probe-buffer)
+                (kill-buffer probe-buffer))))))
         ;; Non-default ghostel settings
         (insert "\n--- Non-default ghostel settings ---\n")
         (let (changed)
@@ -1103,7 +1113,7 @@ delta is what ghostel + TRAMP actually contributed."
   (let ((cmd (plist-get cap :command)))
     (insert "\nWrapper command sent to `make-process':\n")
     (ghostel-debug--insert-command-cells cmd
-      "(nil — make-process advice did not capture a :command)"))
+                                         "(nil — make-process advice did not capture a :command)"))
   ;; If TRAMP rewrote the command for legacy-async dispatch, the
   ;; resulting `process-command' won't match what we sent — typically
   ;; it's a bridge like ("/bin/sh" "-i") that proxies stdio while the

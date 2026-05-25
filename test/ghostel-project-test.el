@@ -72,10 +72,11 @@ proves the project-prefixed binding actually took effect."
     (unwind-protect
         (progn
           (with-current-buffer existing
-            (setq-local ghostel--buffer-identity "*ghostel*"))
+            (ghostel-mode)
+            (setq-local ghostel--buffer-identity "*ghostel*")
+            (setq-local ghostel--term 'fake-term))
           (with-current-buffer existing (rename-buffer "*ghostel: zsh*"))
           (cl-letf (((symbol-function 'ghostel--load-module) (lambda (&rest _) nil))
-                    ((symbol-function 'ghostel--init-buffer) (lambda (&rest _) nil))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (b &rest _) (setq popped b))))
             (ghostel))
@@ -96,7 +97,9 @@ proves the project-prefixed binding actually took effect."
     (unwind-protect
         (progn
           (with-current-buffer existing
-            (setq-local ghostel--buffer-identity project-name))
+            (ghostel-mode)
+            (setq-local ghostel--buffer-identity project-name)
+            (setq-local ghostel--term 'fake-term))
           (with-current-buffer existing (rename-buffer "*ghostel: zsh*"))
           (cl-letf (((symbol-function 'project-current)
                      (lambda (&optional _) '(transient . "/tmp/myproj/")))
@@ -105,7 +108,6 @@ proves the project-prefixed binding actually took effect."
                     ((symbol-function 'project-prefixed-buffer-name)
                      (lambda (name) (format "*myproj-%s*" name)))
                     ((symbol-function 'ghostel--load-module) (lambda (&rest _) nil))
-                    ((symbol-function 'ghostel--init-buffer) (lambda (&rest _) nil))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (b &rest _) (setq popped b))))
             (ghostel-project))
@@ -122,19 +124,59 @@ proves the project-prefixed binding actually took effect."
         (progn
           (cl-letf (((symbol-function 'ghostel--new) (lambda (&rest _) 'fake))
                     ((symbol-function 'ghostel--set-size) #'ignore)
-                    ((symbol-function 'ghostel--apply-palette) (lambda (&rest _) nil))
-                    ((symbol-function 'ghostel--start-process) (lambda (&rest _) nil)))
+                    ((symbol-function 'ghostel--apply-palette) (lambda (&rest _) nil)))
             (ghostel--init-buffer buf "*myproj-ghostel*"))
           (should (equal "*myproj-ghostel*"
                          (buffer-local-value 'ghostel--buffer-identity buf))))
       (kill-buffer buf))))
+
+(ert-deftest ghostel-test-init-buffer-rejects-non-empty-buffer ()
+  "`ghostel--init-buffer' only initializes empty buffers."
+  (let ((buf (generate-new-buffer " *ghostel-test-nonempty*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (insert "existing text"))
+          (should-error (ghostel--init-buffer buf) :type 'user-error))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-init-buffer-rejects-existing-terminal ()
+  "`ghostel--init-buffer' signals instead of reinitializing a buffer."
+  (let ((buf (generate-new-buffer " *ghostel-test-reinit*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local ghostel--term 'fake-term))
+          (should-error (ghostel--init-buffer buf) :type 'user-error))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-create-initializes-buffer ()
+  "`ghostel--create' creates a buffer and attaches its terminal through init."
+  (let (buf)
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel--new) (lambda (&rest _) 'fake-term))
+                  ((symbol-function 'ghostel--set-size) #'ignore)
+                  ((symbol-function 'ghostel--apply-palette) #'ignore))
+          (setq buf (ghostel--create " *ghostel-test-create*" "identity" nil 7 33))
+          (should (buffer-live-p buf))
+          (with-current-buffer buf
+            (should (derived-mode-p 'ghostel-mode))
+            (should (eq ghostel--term 'fake-term))
+            (should (= ghostel--term-rows 7))
+            (should (= ghostel--term-cols 33))
+            (should (equal ghostel--buffer-identity "identity"))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 (ert-deftest ghostel-test-returns-buffer ()
   "`ghostel' returns the (live) Ghostel buffer."
   (let* ((ghostel-buffer-name "*ghostel-return-test*")
          result)
     (cl-letf (((symbol-function 'ghostel--load-module) (lambda (&rest _) nil))
-              ((symbol-function 'ghostel--init-buffer) (lambda (&rest _) nil))
+              ((symbol-function 'ghostel--new) (lambda (&rest _) 'fake-term))
+              ((symbol-function 'ghostel--set-size) #'ignore)
+              ((symbol-function 'ghostel--apply-palette) #'ignore)
+              ((symbol-function 'ghostel--start-process) #'ignore)
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (setq result (ghostel)))
     (should (bufferp result))
@@ -154,7 +196,10 @@ proves the project-prefixed binding actually took effect."
               ((symbol-function 'project-prefixed-buffer-name)
                (lambda (name) (format "*retproj-%s*" name)))
               ((symbol-function 'ghostel--load-module) (lambda (&rest _) nil))
-              ((symbol-function 'ghostel--init-buffer) (lambda (&rest _) nil))
+              ((symbol-function 'ghostel--new) (lambda (&rest _) 'fake-term))
+              ((symbol-function 'ghostel--set-size) #'ignore)
+              ((symbol-function 'ghostel--apply-palette) #'ignore)
+              ((symbol-function 'ghostel--start-process) #'ignore)
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (setq result (ghostel-project)))
     (should (bufferp result))
