@@ -66,6 +66,13 @@ const MaterializedPage = struct {
     serial: PageSerial,
     char_len: usize = 0,
     rows: usize = 0,
+
+    pub fn next(self: *@This()) ?*@This() {
+        return if (self.node.next) |n|
+            @fieldParentPtr("node", n)
+        else
+            null;
+    }
 };
 
 const FontInfo = struct {
@@ -818,6 +825,11 @@ pub fn render(
             else => 0,
         };
 
+        var page = if (self.term.screens.active.no_scrollback)
+            null
+        else
+            try self.getOrAddPage(alloc, pin.node.serial);
+
         var i: usize = 0;
         const row_dirty = self.render_state.row_data.items(.dirty);
         while (i < self.render_state.rows) : ({
@@ -833,11 +845,11 @@ pub fn render(
             if (dirty_row or eob) {
                 const row = self.render_state.row_data.get(i);
 
-                // We don't track pages when we have no scrollback
-                const page: ?*MaterializedPage = if (self.rendered_screen.no_scrollback)
-                    null
-                else
-                    try self.getOrAddLastPage(alloc, row.pin.node.serial);
+                if (page) |p| {
+                    if (p.serial != row.pin.node.serial) {
+                        page = p.next() orelse try self.addPage(alloc, row.pin.node.serial);
+                    }
+                }
 
                 const cursor_col = blk: {
                     if (self.render_state.cursor.viewport) |vp| {
@@ -959,12 +971,17 @@ fn gotoActiveStart(self: *Self, env: emacs.Env) void {
     _ = env.f("forward-line", .{-@as(i64, @intCast(self.term.rows))});
 }
 
-fn getOrAddLastPage(self: *Self, alloc: Allocator, serial: PageSerial) !*MaterializedPage {
-    if (self.pages_in_buffer.last) |node| {
-        const page: *MaterializedPage = @fieldParentPtr("node", node);
+fn getOrAddPage(self: *Self, alloc: Allocator, serial: PageSerial) !*MaterializedPage {
+    var node = self.pages_in_buffer.last;
+    while (node) |n| : (node = n.prev) {
+        const page: *MaterializedPage = @fieldParentPtr("node", n);
         if (page.serial == serial) return page;
     }
 
+    return self.addPage(alloc, serial);
+}
+
+fn addPage(self: *Self, alloc: Allocator, serial: PageSerial) !*MaterializedPage {
     const page = try alloc.create(MaterializedPage);
     page.* = .{ .serial = serial };
     self.pages_in_buffer.append(&page.node);
