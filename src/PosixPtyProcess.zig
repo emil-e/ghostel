@@ -274,13 +274,14 @@ pub fn drain(self: *Self, stream: anytype) !bool {
     _ = try posix.poll(&pollfds, -1);
     if (pollfds[1].revents != 0) return false;
 
+    const eof = pollfds[0].revents & posix.POLL.HUP != 0;
     while (true) {
         const len = posix.read(self.pty.primary_fd, buf[0..]) catch |err| switch (err) {
-            error.WouldBlock => return false,
+            error.WouldBlock => return eof,
             error.NotOpenForReading, error.InputOutput => return true,
             else => return err,
         };
-        if (len == 0) return true;
+        if (len == 0) return eof;
         stream.nextSlice(buf[0..len]);
     }
 }

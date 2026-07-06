@@ -201,8 +201,15 @@ pub fn drain(self: *Self, stream: anytype) !bool {
         const available = try peekOutputAvailable(self.state);
         if (available == 0) {
             if (shellProcessExited(self.state)) {
-                stopRunning(self.state);
-                return true;
+                if (!closePseudoConsoleAsync(self.state)) {
+                    stopRunning(self.state);
+                    return true;
+                }
+                // After initiating ConPTY teardown, read even though
+                // PeekNamedPipe reported no bytes. The final output and EOF are
+                // delivered only after ClosePseudoConsole runs.
+                if (self.state.pty_output == c.INVALID_HANDLE_VALUE) return true;
+                return readOutput(self.state, stream, buf[0..]);
             }
             // The ConPTY output pipe is polled with PeekNamedPipe; wait briefly
             // on the child process handle to avoid a hot spin while still
@@ -211,26 +218,32 @@ pub fn drain(self: *Self, stream: anytype) !bool {
             return false;
         }
 
-        var bytes_read: c.DWORD = 0;
-        const read_len: c.DWORD = @intCast(@min(buf.len, available));
-        if (c.ReadFile(self.state.pty_output, buf[0..].ptr, read_len, &bytes_read, null) == 0) {
-            const err = c.GetLastError();
-            switch (err) {
-                c.ERROR_OPERATION_ABORTED, c.ERROR_BROKEN_PIPE, c.ERROR_INVALID_HANDLE => {
-                    stopRunning(self.state);
-                    return true;
-                },
-                else => return error.ReadFailed,
-            }
-        }
-        if (bytes_read == 0) {
-            stopRunning(self.state);
+        if (try readOutput(self.state, stream, buf[0..@intCast(@min(buf.len, available))])) {
             return true;
         }
-        stream.nextSlice(buf[0..@as(usize, @intCast(bytes_read))]);
     }
 
     return true;
+}
+
+fn readOutput(state: *State, stream: anytype, buf: []u8) !bool {
+    var bytes_read: c.DWORD = 0;
+    if (c.ReadFile(state.pty_output, buf.ptr, @intCast(buf.len), &bytes_read, null) == 0) {
+        const err = c.GetLastError();
+        switch (err) {
+            c.ERROR_OPERATION_ABORTED, c.ERROR_BROKEN_PIPE, c.ERROR_INVALID_HANDLE => {
+                stopRunning(state);
+                return true;
+            },
+            else => return error.ReadFailed,
+        }
+    }
+    if (bytes_read == 0) {
+        stopRunning(state);
+        return true;
+    }
+    stream.nextSlice(buf[0..@as(usize, @intCast(bytes_read))]);
+    return false;
 }
 
 fn peekOutputAvailable(state: *State) !c.DWORD {
@@ -366,11 +379,43 @@ fn closeConPtyHandles(state: *State) void {
         _ = c.CloseHandle(state.pty_output);
         state.pty_output = c.INVALID_HANDLE_VALUE;
     }
+    closePseudoConsole(state);
+}
+
+fn closePseudoConsole(state: *State) void {
     if (state.hpc != null) {
         // ClosePseudoConsole owns the documented ConPTY teardown path.
         close_pseudo_console.?(state.hpc);
         state.hpc = null;
     }
+}
+
+fn closePseudoConsoleAsync(state: *State) bool {
+    const hpc = state.hpc;
+    if (hpc == null) return true;
+    state.hpc = null;
+
+    // Child exit only tells us when to initiate teardown; EOF on the output
+    // pipe tells us when ConPTY has flushed its final output. Older Windows can
+    // block inside ClosePseudoConsole until that drain completes, so the reader
+    // thread must hand the handle to a helper and keep reading to EOF.
+    const thread = std.Thread.spawn(
+        .{ .stack_size = 128 * 1024 },
+        closePseudoConsoleHandle,
+        .{hpc},
+    ) catch |err| {
+        std.log.scoped(.ConPtyProcess).err(
+            "Failed to spawn ConPTY closer thread; leaking pseudoconsole handle to avoid reader deadlock: {any}",
+            .{err},
+        );
+        return false;
+    };
+    thread.detach();
+    return true;
+}
+
+fn closePseudoConsoleHandle(hpc: HPCON) void {
+    close_pseudo_console.?(hpc);
 }
 
 fn spawnChild(state: *State, params: ProcessParams) !void {
