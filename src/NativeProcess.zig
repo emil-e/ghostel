@@ -19,7 +19,7 @@ const log = std.log.scoped(.NativeProcessHandler);
 pub const ChannelFd = EventWriter.Fd;
 pub const ProcessParams = Backend.ProcessParams;
 
-backend_mutex: std.Thread.Mutex = .{},
+backend_handoff_mutex: std.Thread.Mutex = .{},
 backend: ?Backend,
 event_writer: EventWriter,
 alloc: Allocator,
@@ -91,23 +91,23 @@ pub fn unlockTerm(self: *Self) void {
 }
 
 pub fn ptyWrite(self: *Self, data: []const u8) !void {
-    self.backend_mutex.lock();
-    defer self.backend_mutex.unlock();
+    self.backend_handoff_mutex.lock();
+    defer self.backend_handoff_mutex.unlock();
 
     if (self.backend) |*backend| return backend.write(data);
     return error.ProcessExited;
 }
 
 pub fn resizePty(self: *Self, cols: u16, rows: u16) !void {
-    self.backend_mutex.lock();
-    defer self.backend_mutex.unlock();
+    self.backend_handoff_mutex.lock();
+    defer self.backend_handoff_mutex.unlock();
 
     if (self.backend) |*backend| try backend.resize(cols, rows);
 }
 
 pub fn isBackendAlive(self: *Self) bool {
-    self.backend_mutex.lock();
-    defer self.backend_mutex.unlock();
+    self.backend_handoff_mutex.lock();
+    defer self.backend_handoff_mutex.unlock();
 
     return self.backend != null;
 }
@@ -174,9 +174,9 @@ fn run(self: *Self) void {
         log.warn("ghostel: error in read loop: {any}", .{err});
     };
 
-    self.backend_mutex.lock();
+    self.backend_handoff_mutex.lock();
     const backend = self.backend orelse {
-        self.backend_mutex.unlock();
+        self.backend_handoff_mutex.unlock();
         return;
     };
 
@@ -190,12 +190,12 @@ fn run(self: *Self) void {
         reapChild,
         .{ backend, self.event_writer },
     ) catch |err| {
-        self.backend_mutex.unlock();
+        self.backend_handoff_mutex.unlock();
         log.err("Failed to spawn reaper thread: {any}", .{err});
         return;
     };
     self.backend = null;
-    self.backend_mutex.unlock();
+    self.backend_handoff_mutex.unlock();
     reaper_thread.detach();
 }
 
@@ -206,12 +206,12 @@ fn loop(self: *Self) !void {
 fn loopOnce(self: *Self) !bool {
     if (@atomicLoad(bool, &self.quit, .monotonic)) return false;
 
-    self.backend_mutex.lock();
+    self.backend_handoff_mutex.lock();
     const backend = if (self.backend) |*backend| backend else {
-        self.backend_mutex.unlock();
+        self.backend_handoff_mutex.unlock();
         return false;
     };
-    self.backend_mutex.unlock();
+    self.backend_handoff_mutex.unlock();
 
     var stream = LockedStream{ .process = self };
     const eof = try backend.drain(&stream);
@@ -244,8 +244,8 @@ fn flushEvents(self: *Self) !void {
     self.event_buf.resize(0);
 }
 
-fn reapChild(process: Backend, event_writer: EventWriter) void {
-    var proc = process;
+fn reapChild(backend: Backend, event_writer: EventWriter) void {
+    var proc = backend;
     var writer = event_writer;
     const exit_code = proc.deinitAndWait();
 
@@ -264,11 +264,11 @@ fn reapChild(process: Backend, event_writer: EventWriter) void {
 pub fn deinit(self: *Self) void {
     @atomicStore(bool, &self.quit, true, .monotonic);
 
-    self.backend_mutex.lock();
+    self.backend_handoff_mutex.lock();
     if (self.backend) |*backend| {
         backend.requestStop(self.thread);
     }
-    self.backend_mutex.unlock();
+    self.backend_handoff_mutex.unlock();
 
     self.thread.join();
 
