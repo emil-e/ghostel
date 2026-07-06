@@ -13,7 +13,7 @@ const ResizePseudoConsoleFn = *const fn (HPCON, c.COORD) callconv(.winapi) c.HRE
 const ClosePseudoConsoleFn = *const fn (HPCON) callconv(.winapi) void;
 
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
-const READ_BUFFER_SIZE = 64 * 1024;
+const READ_BUFFER_SIZE = 4096;
 
 // Kept separate from Self because NativeProcess hands this backend by value to
 // a detached reaper thread.
