@@ -195,22 +195,20 @@ pub fn pidValue(self: *const Self) i64 {
 }
 
 pub fn drain(self: *Self, stream: anytype) !bool {
-    var drained = false;
     var buf: [READ_BUFFER_SIZE]u8 = undefined;
 
     while (self.state.running.load(.acquire)) {
         const available = try peekOutputAvailable(self.state);
         if (available == 0) {
-            if (drained) return true;
             if (shellProcessExited(self.state)) {
                 stopRunning(self.state);
-                return drained;
+                return true;
             }
             // The ConPTY output pipe is polled with PeekNamedPipe; wait briefly
             // on the child process handle to avoid a hot spin while still
             // noticing process exit promptly.
             _ = c.WaitForSingleObject(self.state.shell_process, 10);
-            continue;
+            return false;
         }
 
         var bytes_read: c.DWORD = 0;
@@ -220,20 +218,19 @@ pub fn drain(self: *Self, stream: anytype) !bool {
             switch (err) {
                 c.ERROR_OPERATION_ABORTED, c.ERROR_BROKEN_PIPE, c.ERROR_INVALID_HANDLE => {
                     stopRunning(self.state);
-                    return drained;
+                    return true;
                 },
                 else => return error.ReadFailed,
             }
         }
         if (bytes_read == 0) {
             stopRunning(self.state);
-            return drained;
+            return true;
         }
         stream.nextSlice(buf[0..@as(usize, @intCast(bytes_read))]);
-        drained = true;
     }
 
-    return drained;
+    return true;
 }
 
 fn peekOutputAvailable(state: *State) !c.DWORD {
