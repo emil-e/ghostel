@@ -69,7 +69,7 @@ pub fn GhostelHandler(Context: type) type {
         fn writePtyCallback(handler: *gt.TerminalStream.Handler, data: [:0]const u8) void {
             const self: *Self = @fieldParentPtr("inner", handler);
             if (data.len == 0) return;
-            self.context.ptyWrite(data) catch {};
+            self.context.ptyWriteFromTerminal(data);
         }
 
         /// Called when the terminal receives BEL.
@@ -279,7 +279,7 @@ pub fn GhostelHandler(Context: type) type {
                     terminator.string(),
                 },
             ) catch return;
-            self.context.ptyWrite(written) catch {};
+            self.context.ptyWriteFromTerminal(written);
         }
 
         /// Send `OSC 4;INDEX;rgb:RRRR/GGGG/BBBB <term>` for a palette entry.
@@ -304,7 +304,7 @@ pub fn GhostelHandler(Context: type) type {
                     terminator.string(),
                 },
             ) catch return;
-            self.context.ptyWrite(written) catch {};
+            self.context.ptyWriteFromTerminal(written);
         }
     };
 }
