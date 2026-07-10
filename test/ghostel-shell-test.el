@@ -11,16 +11,13 @@
 (require 'ghostel-test-helpers)
 
 (defmacro ghostel-test--with-cat-process (var &rest body)
-  "Spawn a long-lived `cat' process bound to VAR, run BODY, then clean up.
+  "Run BODY with a live dummy process bound to VAR.
 The process is killed and the temp buffer destroyed on exit so the
 query-before-killing tests don't leak processes between runs."
   (declare (indent 1))
   `(let* ((buf (generate-new-buffer " *ghostel-test-query-cat*"))
-          (,var (make-process :name "ghostel-test-cat"
-                              :buffer buf
-                              :command '("cat")
-                              :connection-type 'pipe
-                              :noquery nil)))
+          (,var (ghostel-test--dummy-process "ghostel-test-query" buf)))
+     (set-process-query-on-exit-flag ,var nil)
      (unwind-protect (progn ,@body)
        (when (process-live-p ,var)
          (delete-process ,var))
@@ -729,6 +726,25 @@ stubbed nil and `ghostel--remote-shell-p' stubbed t."
                     ((symbol-function 'ghostel--remote-shell-p)
                      (lambda () t)))
             (should-not (ghostel--password-prompt-detected-p))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-password-detect-remote-skips-pty-probe ()
+  "Remote password detection must not inspect a nonexistent local pty."
+  :tags '(native)
+  (let ((buf (generate-new-buffer " *ghostel-test-pwd-remote-skip-pty*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (ghostel--write-vt ghostel--term "Password: ")
+          (let ((inhibit-read-only t))
+            (ghostel--redraw ghostel--term t))
+          (cl-letf (((symbol-function 'ghostel--pty-password-input-p)
+                     (lambda (_term) (error "local pty probe should be skipped")))
+                    ((symbol-function 'ghostel--remote-shell-p)
+                     (lambda () t)))
+            (should (eq (ghostel--password-prompt-detected-p) 'regex))))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (ert-deftest ghostel-test-password-detect-skips-regex-on-local ()

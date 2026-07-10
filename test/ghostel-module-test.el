@@ -24,6 +24,38 @@
       (should (equal "https://example.invalid/releases/latest/download/ghostel-module-x86_64-linux.so"
                      (ghostel--module-download-url nil))))))
 
+(ert-deftest ghostel-test-install-support-assets-downloads-provider-assets ()
+  "Support asset installation is generic over provider-returned assets."
+  (let* ((ghostel-github-release-url "https://example.invalid/releases")
+         (dir (make-temp-file "ghostel-support-" t))
+         (downloads nil))
+    (unwind-protect
+        (cl-letf (((symbol-value 'ghostel--support-asset-providers)
+                   (list (lambda ()
+                           (list (make-ghostel--support-asset
+                                  :name "support-a.dll"
+                                  :destination "support-a.dll"
+                                  :required nil)
+                                 (make-ghostel--support-asset
+                                  :name "support-b.exe"
+                                  :destination "x64/support-b.exe"
+                                  :required nil)))))
+                  ((symbol-function 'ghostel--download-file)
+                   (lambda (url dest)
+                     (push (list url dest) downloads)
+                     url))
+                  ((symbol-function 'message) (lambda (&rest _))))
+          (ghostel--install-support-assets dir "0.9.0")
+          (should (equal
+                   (list
+                    (list "https://example.invalid/releases/download/v0.9.0/support-b.exe"
+                          (expand-file-name "x64/support-b.exe" dir))
+                    (list "https://example.invalid/releases/download/v0.9.0/support-a.dll"
+                          (expand-file-name "support-a.dll" dir)))
+                   downloads)))
+      (when (file-exists-p dir)
+        (delete-directory dir t)))))
+
 (ert-deftest ghostel-test-download-module-defaults-to-minimum-version ()
   "Automatic downloads pin to the minimum supported native module version."
   (let* ((ghostel--minimum-module-version "0.7.1")
@@ -39,6 +71,8 @@
                    (lambda (_url dest)
                      (setq download-dest dest)
                      t))
+                  ((symbol-function 'ghostel--install-support-assets)
+                   (lambda (&rest _)))
                   ((symbol-function 'message)
                    (lambda (&rest _))))
           (should (ghostel--download-module dir))
@@ -47,6 +81,29 @@
                                     (concat "ghostel-module" module-file-suffix)
                                     dir))
                          (downcase download-dest))))
+      (when (file-exists-p dir)
+        (delete-directory dir t)))))
+
+(ert-deftest ghostel-test-download-module-installs-support-assets-from-resolved-release ()
+  "Latest module downloads install support assets from the same resolved release."
+  (let* ((ghostel--minimum-module-version "0.7.1")
+         (support-args nil)
+         (dir (make-temp-file "ghostel-dl-latest-" t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel--module-download-url)
+                   (lambda (&optional version)
+                     (should (null version))
+                     "https://example.invalid/releases/latest/download/ghostel-module-x86_64-linux.so"))
+                  ((symbol-function 'ghostel--download-file)
+                   (lambda (_url _dest)
+                     "https://example.invalid/releases/download/v0.9.0/ghostel-module-x86_64-linux.so"))
+                  ((symbol-function 'ghostel--install-support-assets)
+                   (lambda (support-dir version)
+                     (setq support-args (list support-dir version))))
+                  ((symbol-function 'message) (lambda (&rest _))))
+          (should (ghostel--download-module dir nil t))
+          (should (equal (list dir "0.9.0") support-args))
+          (should (equal "0.9.0" (ghostel--read-module-sidecar-version dir))))
       (when (file-exists-p dir)
         (delete-directory dir t)))))
 
@@ -288,6 +345,8 @@ file mmap'd keeps a valid mapping (issue #247)."
                  (lambda (&rest _)))
                 ((symbol-function 'make-directory)
                  (lambda (&rest _)))
+                ((symbol-function 'ghostel--install-support-assets)
+                 (lambda (&rest _)))
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (push (apply #'format fmt args) messages)))
@@ -317,6 +376,7 @@ module beside a stale sidecar (issue #256 follow-up B1)."
   (let ((rename-args nil)
         (made-dirs nil)
         (deleted nil)
+        (support-installs nil)
         (warnings nil))
     (let ((native-comp-enable-subr-trampolines nil))
       (cl-letf (((symbol-function 'ghostel--resource-root)
@@ -334,6 +394,9 @@ module beside a stale sidecar (issue #256 follow-up B1)."
                 ((symbol-function 'rename-file)
                  (lambda (from to &optional _ok)
                    (push (list from to) rename-args)))
+                ((symbol-function 'ghostel--install-support-assets)
+                 (lambda (dir &optional version)
+                   (push (list dir version) support-installs)))
                 ((symbol-function 'message) (lambda (&rest _)))
                 ((symbol-function 'display-warning)
                  (lambda (&rest args) (push args warnings)))
@@ -341,6 +404,7 @@ module beside a stale sidecar (issue #256 follow-up B1)."
                  (lambda (&rest _) 0)))
         (ghostel--compile-module "/custom/dir/")
         (should-not warnings)
+        (should (equal '(("/custom/dir/" nil)) support-installs))
         (should (equal 1 (length deleted)))
         (should (equal (downcase (expand-file-name
                                   "ghostel-module.version"
@@ -365,7 +429,10 @@ module beside a stale sidecar (issue #256 follow-up B1)."
                                     "ghostel-module.version"
                                     "/custom/dir/"))
                          (downcase (nth 1 sidecar-args)))))
-        (should (member "/custom/dir/" made-dirs))))))
+        (should (member (downcase (expand-file-name "/custom/dir/"))
+                        (mapcar (lambda (dir)
+                                  (downcase (expand-file-name dir)))
+                                made-dirs))))))
 
 (ert-deftest ghostel-test-compile-module-warns-when-build-missing ()
   "When the build returns success but no module file appears, warn."
@@ -407,8 +474,9 @@ module beside a stale sidecar (issue #256 follow-up B1)."
                          (list command mode name-function default-directory))
                    (current-buffer))))
         (ghostel-module-compile)
-        (should (equal (concat "zig build --prefix /src/ghostel/.ghostel-build/ "
-                               "-Doptimize=ReleaseFast -Dcpu=baseline")
+        (should (equal (format "zig build --prefix %s -Doptimize=ReleaseFast -Dcpu=baseline"
+                               (shell-quote-argument
+                                (expand-file-name "/src/ghostel/.ghostel-build/")))
                        (nth 0 compile-invocation)))
         (should (eq #'ghostel-module-compilation-mode (nth 1 compile-invocation)))
         (should (eq #'ghostel--module-compilation-buffer-name
@@ -442,8 +510,9 @@ sidecar and then renames the module and sidecar into place."
                          (list command mode name-function default-directory))
                    (current-buffer))))
         (ghostel-module-compile)
-        (should (equal (concat "zig build --prefix /custom/dir/.ghostel-build/ "
-                               "-Doptimize=ReleaseFast -Dcpu=baseline")
+        (should (equal (format "zig build --prefix %s -Doptimize=ReleaseFast -Dcpu=baseline"
+                               (shell-quote-argument
+                                (expand-file-name "/custom/dir/.ghostel-build/")))
                        (nth 0 compile-invocation)))
         (should (eq #'ghostel-module-compilation-mode (nth 1 compile-invocation)))
         (should (eq #'ghostel--module-compilation-buffer-name
@@ -454,6 +523,37 @@ sidecar and then renames the module and sidecar into place."
                              "/custom/dir/")
                        finish-args))))))
 
+(ert-deftest ghostel-test-module-compile-finish-installs-support-assets ()
+  "Interactive compile finish installs latest support assets after the module."
+  (let* ((root (make-temp-file "ghostel-module-finish" t))
+         (build-dir (file-name-as-directory (expand-file-name "build" root)))
+         (dest-dir (file-name-as-directory (expand-file-name "module" root)))
+         (module-name (concat "ghostel-module" module-file-suffix))
+         (support-installs nil)
+         (buf (generate-new-buffer " *ghostel-module-finish*")))
+    (unwind-protect
+        (progn
+          (make-directory build-dir t)
+          (with-temp-file (expand-file-name module-name build-dir)
+            (insert "module"))
+          (with-temp-file (expand-file-name "ghostel-module.version" build-dir)
+            (insert "0.99.0\n"))
+          (with-current-buffer buf
+            (setq-local ghostel--module-compile-build-dir build-dir
+                        ghostel--module-compile-dest-dir dest-dir))
+          (cl-letf (((symbol-function 'ghostel--install-support-assets)
+                     (lambda (dir &optional version)
+                       (push (list dir version) support-installs)))
+                    ((symbol-function 'message) (lambda (&rest _))))
+            (ghostel--install-built-module-after-compilation buf "finished\n"))
+          (should (file-exists-p (expand-file-name module-name dest-dir)))
+          (should (equal "0.99.0" (ghostel--read-module-sidecar-version dest-dir)))
+          (should (equal (list (list dest-dir nil)) support-installs)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf))
+      (when (file-exists-p root)
+        (delete-directory root t)))))
+
 (ert-deftest ghostel-test-module-compile-recompile-installs-built-module ()
   "`ghostel-module-compile' installs artifacts again after `recompile'."
   (let* ((root (make-temp-file "ghostel-module-recompile" t))
@@ -463,19 +563,35 @@ sidecar and then renames the module and sidecar into place."
          (final (expand-file-name module-name dest-dir))
          (final-sidecar (expand-file-name "ghostel-module.version" dest-dir))
          (compile-buffer-name " *ghostel-module-recompile*")
+         (script (expand-file-name "write-module.el" root))
+         (emacs (expand-file-name invocation-name invocation-directory))
          (compilation-ask-about-save nil)
          (ghostel-module-directory dest-dir)
+         (ghostel--support-asset-providers nil)
          (ghostel-module-compile-command
-          (format "sh -c %s sh %%s"
-                  (shell-quote-argument
-                   (format (concat "n=$(($(cat %s 2>/dev/null || echo 0)+1)); "
-                                   "printf \"$n\" > %s; "
-                                   "mkdir -p \"$1\"; "
-                                   "printf \"module-$n\" > \"$1/%s\"; "
-                                   "printf \"$n\" > \"$1/ghostel-module.version\"")
-                           (shell-quote-argument counter)
-                           (shell-quote-argument counter)
-                           module-name)))))
+          (format "%s --batch -Q --script %s %%s"
+                  (shell-quote-argument emacs)
+                  (shell-quote-argument script)))))
+    (with-temp-file script
+      (prin1
+       `(let* ((build-dir (file-name-as-directory
+                           (car command-line-args-left)))
+               (counter ,counter)
+               (module-name ,module-name)
+               (n (if (file-exists-p counter)
+                      (with-temp-buffer
+                        (insert-file-contents counter)
+                        (string-to-number (buffer-string)))
+                    0)))
+          (setq n (1+ n))
+          (make-directory build-dir t)
+          (with-temp-file counter (princ n (current-buffer)))
+          (with-temp-file (expand-file-name module-name build-dir)
+            (princ (format "module-%d" n) (current-buffer)))
+          (with-temp-file (expand-file-name "ghostel-module.version" build-dir)
+            (princ n (current-buffer))))
+       (current-buffer))
+      (terpri (current-buffer)))
     (cl-labels ((read-file (file)
                   (and (file-exists-p file)
                        (with-temp-buffer
@@ -896,7 +1012,14 @@ both the .so/.dylib and ghostel-module.version next to it."
   ;; aarch64 unchanged
   (let ((system-configuration "aarch64-unknown-linux-gnu")
         (system-type 'gnu/linux))
-    (should (equal (ghostel--module-platform-tag) "aarch64-linux"))))
+    (should (equal (ghostel--module-platform-tag) "aarch64-linux")))
+  ;; Windows release tags use the same normalized arch names.
+  (let ((system-configuration "amd64-w64-mingw32")
+        (system-type 'windows-nt))
+    (should (equal (ghostel--module-platform-tag) "x86_64-windows")))
+  (let ((system-configuration "arm64-w64-mingw32")
+        (system-type 'windows-nt))
+    (should (equal (ghostel--module-platform-tag) "aarch64-windows"))))
 
 (provide 'ghostel-module-test)
 ;;; ghostel-module-test.el ends here
