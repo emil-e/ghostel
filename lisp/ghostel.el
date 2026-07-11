@@ -4666,6 +4666,15 @@ the bottom of WINDOW."
               (start (nth 2 size)))
     (cons start (max 0 (- (nth 1 size) body-height)))))
 
+(defun ghostel--pixel-anchor-cache-key (window target)
+  "Return the geometry key for WINDOW's pixel anchor at TARGET."
+  (list target
+        ghostel--term-rows
+        (window-body-width window t)
+        (window-body-height window t)
+        (with-selected-window window (default-line-height))
+        (and (boundp 'ghostel--rendered-font) ghostel--rendered-font)))
+
 (defun ghostel--anchor-window (&optional window force)
   "Scroll WINDOW so that the last row is aligned to the bottom of the window.
 In graphical frames, use Emacs's pixel layout for exact bottom alignment.
@@ -4694,16 +4703,32 @@ user's point, since its input region is user-owned."
                             'ghostel-inhibit-anchor-functions window force))))))
     (with-selected-window window
       (with-current-buffer buffer
-        (let ((target (point-max))
+        (let* ((target (point-max))
               ;; Line mode's input region is user-owned; keep point instead of
               ;; snapping it to the terminal cursor.
-              (orig (point)))
-          (if-let* ((anchor (and (display-graphic-p (window-frame window))
-                                 ghostel--pixel-anchor-supported-p
-                                 (ghostel--pixel-anchor window target))))
+              (orig (point))
+              (pixel-p (and (display-graphic-p (window-frame window))
+                            ghostel--pixel-anchor-supported-p))
+              (cache-key (and pixel-p
+                              (not ghostel--kitty-active)
+                              (ghostel--pixel-anchor-cache-key window target)))
+              (cached (and (not force)
+                           cache-key
+                           (window-parameter window 'ghostel--pixel-anchor-cache)))
+              (cache-hit (and cached (equal (car cached) cache-key)))
+              (anchor (and pixel-p
+                           (if cache-hit
+                               (cdr cached)
+                             (ghostel--pixel-anchor window target)))))
+          (if anchor
               (progn
-                (set-window-start window (car anchor))
-                (ghostel--set-window-vscroll window (cdr anchor) t t))
+                (set-window-parameter
+                 window 'ghostel--pixel-anchor-cache
+                 (and cache-key (cons cache-key anchor)))
+                (unless cache-hit
+                  (set-window-start window (car anchor))
+                  (ghostel--set-window-vscroll window (cdr anchor) t t)))
+            (set-window-parameter window 'ghostel--pixel-anchor-cache nil)
             (let ((lines (window-screen-lines)))
               (goto-char target)
               (forward-line (- (floor lines)))
