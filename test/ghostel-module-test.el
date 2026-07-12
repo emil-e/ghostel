@@ -700,6 +700,58 @@ missing-file code path, then restores them."
         (cl-pushnew 'ghostel-module features)))
     (should (null calls))))
 
+(ert-deftest ghostel-test-load-module-stops-after-failed-interactive-install ()
+  "A failed install must not escape as a later `void-function' error."
+  (let* ((tmp (make-temp-file "ghostel-test-install-fail" t))
+         (had-feat (featurep 'ghostel-module))
+         (saved-new (and (fboundp 'ghostel--new)
+                         (symbol-function 'ghostel--new))))
+    (unwind-protect
+        (progn
+          (when had-feat
+            (setq features (delq 'ghostel-module features)))
+          (when saved-new
+            (fmakunbound 'ghostel--new))
+          (cl-letf (((symbol-function 'ghostel--module-directory)
+                     (lambda () (file-name-as-directory tmp)))
+                    ((symbol-function 'ghostel--ensure-module)
+                     (lambda (_dir)
+                       (setq ghostel--last-download-error
+                             "HTTP status 404 from example.invalid")
+                       nil)))
+            (let ((err (should-error (ghostel--load-module t)
+                                     :type 'user-error)))
+              (should (string-match-p "HTTP status 404"
+                                      (error-message-string err)))
+              (should (string-match-p "ghostel-module"
+                                      (error-message-string err))))))
+      (delete-directory tmp t)
+      (when saved-new
+        (fset 'ghostel--new saved-new))
+      (when had-feat
+        (cl-pushnew 'ghostel-module features)))))
+
+(ert-deftest ghostel-test-download-file-records-http-error ()
+  "A non-success HTTP response records a useful diagnostic."
+  (let* ((tmp (make-temp-file "ghostel-test-http" t))
+         (dest (expand-file-name "module.so" tmp))
+         (response (generate-new-buffer " *ghostel-http-response*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer response
+            (insert "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"))
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (lambda (&rest _) response))
+                    ((symbol-function 'message) (lambda (&rest _))))
+            (should-not
+             (ghostel--download-file "https://example.invalid/module.so" dest)))
+          (should (equal ghostel--last-download-error
+                         "HTTP status 404 from https://example.invalid/module.so"))
+          (should-not (file-exists-p dest)))
+      (when (buffer-live-p response)
+        (kill-buffer response))
+      (delete-directory tmp t))))
+
 (ert-deftest ghostel-test-module-version-newer-than-minimum ()
   "Test that version check does nothing when module exceeds minimum."
   (let ((warned nil)

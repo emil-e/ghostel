@@ -65,6 +65,9 @@ Customize this when downloading pre-built modules from a fork or mirror."
   :type 'string
   :group 'ghostel)
 
+(defvar ghostel--last-download-error nil
+  "Description of the most recent native asset download failure.")
+
 
 ;;; Native module download, compilation, and loading
 
@@ -191,7 +194,8 @@ Returns non-nil on success."
               (message "ghostel: native module downloaded successfully")
               t))))
     (error
-     (message "ghostel: download failed: %s" (error-message-string err))
+     (setq ghostel--last-download-error (error-message-string err))
+     (message "ghostel: download failed: %s" ghostel--last-download-error)
      nil)))
 
 (defun ghostel--compile-module (dest-dir)
@@ -236,6 +240,7 @@ on success the produced module and its sidecar are moved into DEST-DIR."
 (defun ghostel--ensure-module (dir)
   "Ensure the native module exists in DIR.
 Behavior is controlled by `ghostel-module-auto-install'."
+  (setq ghostel--last-download-error nil)
   (let ((action ghostel-module-auto-install))
     (when (eq action 'ask)
       (setq action (ghostel--ask-install-action dir)))
@@ -289,13 +294,26 @@ would truncate the existing inode and corrupt that mapping."
          (url-show-status nil)
          (tmp (make-temp-name (concat dest ".tmp.")))
          (final-url nil))
+    (setq ghostel--last-download-error nil)
     (unwind-protect
         (let ((buf (url-retrieve-synchronously url t t 30)))
+          (unless buf
+            (setq ghostel--last-download-error
+                  (format "No response received from %s" url)))
           (when buf
             (unwind-protect
                 (with-current-buffer buf
                   (set-buffer-multibyte nil)
                   (goto-char (point-min))
+                  (save-excursion
+                    (setq ghostel--last-download-error
+                          (cond
+                           ((not (re-search-forward
+                                  "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t))
+                            (format "Malformed HTTP response from %s" url))
+                           ((not (string= (match-string 1) "200"))
+                            (format "HTTP status %s from %s"
+                                    (match-string 1) url)))))
                   (when (re-search-forward "^HTTP/[0-9.]+ 200" nil t)
                     (when (re-search-forward "\r?\n\r?\n" nil t)
                       (let ((coding-system-for-write 'binary)
@@ -317,6 +335,8 @@ would truncate the existing inode and corrupt that mapping."
       (unless final-url
         (when (file-exists-p tmp)
           (ignore-errors (delete-file tmp)))))
+    (when ghostel--last-download-error
+      (message "ghostel: download failed: %s" ghostel--last-download-error))
     final-url))
 
 (defun ghostel--package-directory ()
@@ -422,7 +442,10 @@ Leaving the prompt empty downloads the latest release."
             (message "ghostel: module downloaded.  Restart Emacs to load the new version")
           (module-load mod)
           (message "ghostel: module loaded successfully"))
-      (user-error "Download failed.  Try M-x ghostel-module-compile to build from source"))))
+      (user-error "Download failed%s.  Try M-x ghostel-module-compile to build from source"
+                  (if ghostel--last-download-error
+                      (format ": %s" ghostel--last-download-error)
+                    "")))))
 
 (defvar-local ghostel--module-compile-build-dir nil
   "Temporary Zig install prefix for an interactive module compile buffer.")
@@ -607,7 +630,18 @@ entry points so tests run without the module present."
     ;; mapped in by an earlier load (e.g. sidecar absent at startup) is
     ;; silently kept and the user only ever sees the bare warning.
     (when (and prompt-user (featurep 'ghostel-module))
-      (ghostel--check-module-version dir t))))
+      (ghostel--check-module-version dir t))
+    ;; An interactive caller is about to use native entry points.  If the
+    ;; selected install action failed (or the user skipped it), stop here
+    ;; instead of letting the caller fail later with a misleading
+    ;; `void-function ghostel--new'.
+    (when (and prompt-user (not (fboundp 'ghostel--new)))
+      (user-error
+       "Ghostel native module is unavailable%s (expected at %s)"
+       (if ghostel--last-download-error
+           (format ": %s" ghostel--last-download-error)
+         " after the installation attempt")
+       mod))))
 
 (provide 'ghostel-module-install)
 ;;; ghostel-module-install.el ends here
