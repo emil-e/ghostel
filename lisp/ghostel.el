@@ -96,7 +96,6 @@
 (require 'url-parse)
 (require 'face-remap)
 (require 'ghostel-faces)
-(require 'ghostel-kitty)
 (require 'ghostel-line-mode)
 (require 'ghostel-module-install)
 (require 'ghostel-prompt)

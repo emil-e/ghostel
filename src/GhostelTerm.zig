@@ -83,9 +83,6 @@ pub fn redraw(self: *Self, force_full: bool, force_sync: bool) !bool {
     const env = emacs.current_env orelse return false;
     const pre_size = .{ self.terminal.cols, self.terminal.rows };
     if (!try self.renderer.redraw(env, force_full, force_sync)) return false;
-
-    _ = env.f("ghostel--kitty-clear", .{});
-    try kitty_graphics.emitPlacements(env, self);
     const post_size = .{ self.terminal.cols, self.terminal.rows };
 
     if (!std.meta.eql(pre_size, post_size)) {
