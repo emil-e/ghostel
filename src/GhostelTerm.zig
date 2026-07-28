@@ -10,7 +10,6 @@ const gt = @import("ghostty-vt");
 const GhostelHandler = @import("handler.zig").GhostelHandler;
 const Renderer = @import("Renderer.zig");
 const input = @import("input.zig");
-const kitty_graphics = @import("kitty_graphics.zig");
 const utils = @import("utils.zig");
 const parseHexColor = utils.parseHexColor;
 const platform = @import("platform.zig");

@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const gt = @import("ghostty-vt");
 
 const GhostelTerm = @import("GhostelTerm.zig");
+const KittyGraphics = @import("KittyGraphics.zig");
 const GlyphMetricsCache = @import("GlyphMetricsCache.zig");
 const SavedBufferMarkers = @import("saved_markers.zig").SavedBufferMarkers;
 const emacs = @import("emacs.zig");

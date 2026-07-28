@@ -4,6 +4,10 @@ const kitty = gt.kitty.graphics;
 
 const Self = @This();
 
+const PlacementKey = kitty.ImageStorage.PlacementKey;
+const Placement = kitty.ImageStorage.Placement;
+const PlacementMap = @FieldType(kitty.ImageStorage, "placements");
+
 const TrackedPlacement = struct {
     position: *gt.Pin,
     rows: u32,
@@ -12,19 +16,13 @@ const TrackedPlacement = struct {
 const SliceList = std.DoublyLinkedList(Slice);
 
 const Slice = struct {
-    image_id: u32,
-    start: u32,
-    cols: u32,
-
-    source_x: u32 = 0,
-    source_y: u32 = 0,
-    source_width: u32 = 0,
-    source_height: u32 = 0,
-
-    z: i32 = 0,
+    node: std.DoublyLinkedList.Node,
+    placement: PlacementKey,
+    source_row: u32,
+    source_col: u32,
+    width: u32,
+    z: i32,
 };
-
-const PlacementMap = @FieldType(kitty.ImageStorage, "placements");
 
 term: *gt.Terminal,
 alloc: std.mem.Allocator,
@@ -54,7 +52,7 @@ fn update(self: *Self) void {
         var row_it = placement.position.rowIterator(.right_down, null);
         var i: usize = 0;
         while (row_it.next()) |pin| : (i += 1) {
-            if (i > placement.rows) break;
+            if (i >= placement.rows) break;
             self.rows.put(pin, .{});
         }
     }
@@ -67,36 +65,42 @@ fn update(self: *Self) void {
     self.rendered_screen = screen;
 }
 
-fn updateWithPlacement(self: *Self, placement: *const kitty.ImageStorage.Placement) void {
-    if (placement.location == .virtual) return;
+fn updateWithPlacement(self: *Self, entry: *const PlacementMap.Entry) void {
+    if (entry.value_ptr.location == .virtual) return;
 
-    var it = placement.location.pin.rowIterator(.right_down, null);
-	var i: usize = 0;
-	while (it.next()) |pin| (i += 1) {
+    var it = entry.value_ptr.location.pin.rowIterator(.right_down, null);
+    var i: usize = 0;
+    while (it.next()) |pin| : (i += 1) {
+        if (i >= entry.value_ptr.rows) break;
+        const slice = try self.slice_arena.allocator().create(Slice);
+        errdefer self.slice_arena.allocator().destroy(slice);
+        slice.* = .{
+            .placement = entry.key_ptr.*,
+            .source_row = i,
+            .source_col = 0,
+            .width = entry,
+            .z = entry.value_ptr.z,
+        };
 
-	}
+        self.insertSlice(pin, slice);
+    }
 }
 
-fn slice(self: *Self, entry: *PlacementMap.Entry, i: usize) Slice {
-	const key = entry.key_ptr;
-	const val = entry.value_ptr;
+fn insertSlice(self: *Self, pin: gt.Pin, slice: *Slice) void {
+    const result = try self.rows.getOrPut(self.alloc, pin);
+    const list = result.value_ptr;
+    if (!result.found_existing) list.* = .empty;
 
-	const heightf: f64 = @floatFromInt(val.source_height);
-	const slice_height: f64 = @floatFromInt(heightf / @floatFromInt(val.rows));
-	const cell_height = self.term.height_px / self.term.rows;
-	const x_offset = cell_height - val.x_offset;
-	const y_offset = cell_height - val.y_offset;
+    var node = list.first;
+    while (node) |n| : (node = n.next) {
+        const other: *const Slice = @fieldParentPtr("node", n);
+        if (slice.z < other.z) {
+            self.list.rows.insertBefore(n, &slice.node);
+            return;
+        }
+    }
 
-	return .{
-		.image_id = key.image_id,
-		.start = val.location.pin.x,
-		.cols = val.columns,
-		.source_x = x_offset + val.source_x,
-		.source_y = y_offset + val.source_y + (i * slice_height),
-		.source_height = slice_height,
-		.source_width = val.source_width,
-		.z = val.z,
-	};
+    list.append(&slice.node);
 }
 
 fn capturePlacements(self: *Self) void {
