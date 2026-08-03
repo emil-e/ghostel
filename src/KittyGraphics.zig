@@ -59,7 +59,12 @@ fn update(self: *Self) void {
 
     const screen = self.term.screens.active;
     var placement_it = screen.kitty_images.placements.iterator();
-    for (placement_it.next()) |*placement| self.updateWithPlacement(placement);
+    while (placement_it.next()) |*placement| self.updateWithPlacement(placement);
+
+    var virtual_it = kitty.unicode.placementIterator(screen.pages.getTopLeft(.screen));
+    while (virtual_it.next()) |*placement| self.updateWithPlacement(placement);
+
+    self.clipRows();
 
     self.capturePlacements();
     self.rendered_screen = screen;
@@ -86,6 +91,35 @@ fn updateWithPlacement(self: *Self, entry: *const PlacementMap.Entry) void {
     }
 }
 
+fn updateWithVirtualPlacement(
+    self: *Self,
+    virtual: *const kitty.unicode.Placement,
+) void {
+    const key = .{
+        .image_id = virtual.image_id,
+        .placement_id = virtual.placement_id,
+    };
+    const placement = self.term.screens.active.kitty_images.placements.get(key);
+    if (placement == null) return;
+
+    var it = virtual.pin.rowIterator(.right_down, null);
+    var i: usize = 0;
+    while (it.next()) |pin| : (i += 1) {
+        if (i >= virtual.height) break;
+
+        const slice = try self.slice_arena.allocator().create(Slice);
+        errdefer self.slice_arena.allocator().destroy(slice);
+        slice.* = .{
+            .placement = key,
+            .source_row = virtual.row,
+            .source_col = virtual.col,
+            .width = virtual.width,
+            .z = placement.?.z,
+        };
+        self.insertSlice(pin, slice);
+    }
+}
+
 fn insertSlice(self: *Self, pin: gt.Pin, slice: *Slice) void {
     const result = try self.rows.getOrPut(self.alloc, pin);
     const list = result.value_ptr;
@@ -102,6 +136,8 @@ fn insertSlice(self: *Self, pin: gt.Pin, slice: *Slice) void {
 
     list.append(&slice.node);
 }
+
+fn clipRows(self: *Self) void {}
 
 fn capturePlacements(self: *Self) void {
     self.clearPlacements();
